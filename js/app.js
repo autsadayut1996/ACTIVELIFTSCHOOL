@@ -51,9 +51,11 @@
       cards: {},
       pass: null,
       priceVariant: null,
-      fakeDoor: { views: 0, buyClicks: 0, parentClicks: 0 },
+      fakeDoor: { views: 0, buyClicks: 0, parentClicks: 0, teacherInvites: 0 },
+      coupons: [],
       tab: 'home',
       seasonView: 'pass',
+      roomView: 'decor',
     };
   }
 
@@ -463,6 +465,15 @@
         ${roomHtml(state.placed, state.theme, state.profile.avatar, state.acc, schoolBadge())}
         <p class="muted small">ขยับครบ = ได้เหรียญมาแต่งห้อง แต่งเสร็จแคปไปลงสตอรี่ได้เลย 📸</p>
       </section>
+      <div class="seg two">
+        <button class="${state.roomView === 'decor' ? 'on' : ''}" data-action="room-view" data-v="decor">🛋️ ของแต่ง</button>
+        <button class="${state.roomView === 'coupons' ? 'on' : ''}" data-action="room-view" data-v="coupons">🎁 คูปองร้านค้า</button>
+      </div>
+      ${state.roomView === 'coupons' ? viewCoupons() : viewShop(shopItems)}`;
+  }
+
+  function viewShop(shopItems) {
+    return `
       <section class="card">
         <h3>ของในห้อง & ร้านค้า</h3>
         <p class="muted small">ขายแค่ของแต่ง ไม่มีของที่ทำให้ได้ XP เร็วขึ้น — แฟร์กับทุกคน</p>
@@ -702,13 +713,14 @@
 
   function viewSeason() {
     const seg = [
-      ['pass', '🎟️ Battle Pass'],
+      ['pass', '🎟️ Pass'],
       ['league', '🏫 League'],
+      ['tournament', '⚔️ ทัวร์'],
       ['cards', '🃏 การ์ด'],
     ];
-    const views = { pass: viewPass, league: viewLeague, cards: viewCards };
+    const views = { pass: viewPass, league: viewLeague, tournament: viewTournament, cards: viewCards };
     return `
-      <div class="seg">${seg.map(([v, n]) => `<button class="${state.seasonView === v ? 'on' : ''}" data-action="season-view" data-v="${v}">${n}</button>`).join('')}</div>
+      <div class="seg four">${seg.map(([v, n]) => `<button class="${state.seasonView === v ? 'on' : ''}" data-action="season-view" data-v="${v}">${n}</button>`).join('')}</div>
       ${views[state.seasonView]()}`;
   }
 
@@ -953,6 +965,191 @@
     closeModal();
     render();
     toast('แลกกับ' + name + 'แล้ว ได้ ' + offer.emoji + ' ' + offer.name);
+  }
+
+  // ---------- Phase 3: inter-school tournament ----------
+
+  function userTournamentDays(round) {
+    return Object.keys(state.checkins).filter((k) => k >= round.startKey && k <= round.endKey).length;
+  }
+
+  function tournamentBracket(t) {
+    const tour = L.tournamentFor(t);
+    const seeds = D.TOURNAMENT_SCHOOLS.slice().sort((a, b) => L.seededRandom(a + '|seed|' + tour.season) - L.seededRandom(b + '|seed|' + tour.season));
+    const counted = state.visibility === 'school';
+    const score = (id, round) => {
+      const user = id === state.profile.schoolId ? { counted, days: userTournamentDays(round) } : null;
+      return L.tournamentScore({ id }, round, t, user);
+    };
+    return { tour, rounds: L.bracket(seeds, tour.rounds, t, score) };
+  }
+
+  function shortSchool(id) {
+    return byId(D.SCHOOLS, id).name.replace(/^โรงเรียน|^มหาวิทยาลัย/, '').replace(/ \(.*\)$/, '');
+  }
+
+  function viewTournament() {
+    const t = today();
+    const { tour, rounds } = tournamentBracket(t);
+    const partner = D.TOURNAMENT_SCHOOLS.includes(state.profile.schoolId);
+    const parts = [];
+
+    parts.push(`
+      <section class="card">
+        <div class="row between"><h3>⚔️ ศึกขยับข้ามโรงเรียน</h3><span class="pill">ซีซั่น ${tour.season}</span></div>
+        <p class="muted small">แข่งแบบแพ้คัดออก 8 สถาบัน สัปดาห์ละรอบ (สัปดาห์ที่ 2–4 ของซีซั่น)<br/>คะแนน = % ของสมาชิกที่ขยับอย่างน้อย ${L.TOURNAMENT_MIN_DAYS} วันในสัปดาห์นั้น ทุกคนช่วยได้เท่ากัน ไม่ว่าจะเก่งแค่ไหน</p>
+        ${tour.phase === 'upcoming' ? `<p>เริ่ม ${tour.startKey} (อีก ${L.diffDays(t, tour.startKey)} วัน) เตรียมชวนเพื่อนไว้เลย!</p>` : ''}
+      </section>`);
+
+    if (!partner) {
+      parts.push(`
+        <section class="card premium-cta">
+          <h3>🏫 ${esc(schoolName())} ยังไม่ได้เข้าร่วม</h3>
+          <p class="small">ทัวร์นาเมนต์จัดร่วมกับโรงเรียนที่เป็นพาร์ทเนอร์ ให้ครูพละหรือสโมสรนักเรียนสมัครให้ได้ ใช้ในวิชาพลศึกษาได้ด้วย</p>
+          <button class="btn primary" data-action="invite-teacher">ชวนครูพละให้โรงเรียนเข้าร่วม</button>
+        </section>`);
+    } else if (tour.phase === 'live') {
+      const live = rounds[rounds.length - 1];
+      const round = tour.rounds[live.round];
+      const days = userTournamentDays(round);
+      const stillIn = live.matches.some((m) => m.a === state.profile.schoolId || m.b === state.profile.schoolId);
+      parts.push(`
+        <section class="card">
+          <h3>สัปดาห์นี้: ${D.ROUND_NAMES[live.round]}</h3>
+          ${
+            !stillIn
+              ? '<p>โรงเรียนของคุณตกรอบแล้ว ซีซั่นหน้าเอาใหม่! 💪 ยังเชียร์โรงเรียนอื่นได้นะ</p>'
+              : state.visibility !== 'school'
+                ? `<p class="small">การขยับของคุณจะนับให้โรงเรียนเมื่อเปิดการมองเห็นระดับโรงเรียน</p><button class="btn" data-action="join-league">นับให้โรงเรียนด้วย</button>`
+                : `<p>คุณขยับไปแล้ว <b>${Math.min(days, L.TOURNAMENT_MIN_DAYS)}/${L.TOURNAMENT_MIN_DAYS}</b> วัน ${days >= L.TOURNAMENT_MIN_DAYS ? '— นับเป็น 1 คนให้โรงเรียนแล้ว ✓' : ''}</p>
+                   <div class="bar"><div style="width:${(Math.min(days, L.TOURNAMENT_MIN_DAYS) / L.TOURNAMENT_MIN_DAYS) * 100}%"></div></div>`
+          }
+        </section>`);
+    }
+
+    rounds.forEach((r) => {
+      parts.push(`
+        <section class="card">
+          <div class="row between"><h3>${D.ROUND_NAMES[r.round]}</h3><span class="pill">${r.finished ? 'จบแล้ว' : 'กำลังแข่ง'}</span></div>
+          ${r.matches
+            .map((m) => {
+              const side = (id, sc) => `<div class="side${m.winner === id ? ' win' : ''}${id === state.profile.schoolId ? ' mine' : ''}"><span>${esc(shortSchool(id))}</span><b>${sc}%</b></div>`;
+              return `<div class="match">${side(m.a, m.sa)}${side(m.b, m.sb)}</div>`;
+            })
+            .join('')}
+        </section>`);
+    });
+
+    if (tour.phase === 'done') {
+      const final = rounds[2].matches[0];
+      const mine = final.winner === state.profile.schoolId;
+      parts.push(`
+        <section class="card center ${mine ? 'done' : ''}">
+          <div class="hero">🏆</div>
+          <h2>แชมป์ซีซั่น ${tour.season}: ${esc(shortSchool(final.winner))}</h2>
+          <p class="muted">${mine ? 'โรงเรียนของคุณคือแชมป์! ทุกคนที่ขยับคือส่วนหนึ่งของชัยชนะนี้ 🎉' : 'ทัวร์นาเมนต์ใหม่เริ่มสัปดาห์ที่ 2 ของซีซั่นหน้า'}</p>
+        </section>`);
+    }
+    return parts.join('');
+  }
+
+  function teacherMessage() {
+    return `เรียนคุณครู นักเรียนอยากชวน ${schoolName()} เข้าร่วม “ศึกขยับข้ามโรงเรียน” ของแอป ActiveLift School ค่ะ/ครับ เป็นแอปออกกำลังกายที่ไม่วัดรูปร่างหรือน้ำหนัก วัดแค่ความสม่ำเสมอ ใช้ประกอบวิชาพลศึกษาได้ และโรงเรียนดูภาพรวมการขยับของนักเรียนได้`;
+  }
+
+  function openTeacherInvite() {
+    state.fakeDoor.teacherInvites = (state.fakeDoor.teacherInvites || 0) + 1;
+    save();
+    const msg = teacherMessage();
+    if (navigator.clipboard) navigator.clipboard.writeText(msg).catch(() => {});
+    openModal(`
+      <h2>ชวนครูพละ 🧑‍🏫</h2>
+      <p class="muted small">ส่งข้อความนี้ให้ครูหรือสโมสรนักเรียน ทีมงานจะติดต่อกลับเพื่อจัดแข่งให้</p>
+      <div class="note">${esc(msg)}</div>
+      <p class="muted small">ขอบคุณที่ช่วยชวน! (prototype: นับไว้เป็นความสนใจของโรงเรียน)</p>
+      <button class="btn primary big" data-action="close-modal">เรียบร้อย</button>`);
+  }
+
+  // ---------- Phase 3: local brand redemption ----------
+
+  function viewCoupons() {
+    const t = today();
+    const coupons = state.coupons.slice().reverse();
+    const can = L.canRedeem(state.coupons, t);
+    const statusText = { active: 'ใช้ได้', used: 'ใช้แล้ว', expired: 'หมดอายุ' };
+    return `
+      <section class="card">
+        <div class="row between"><h3>🎁 คูปองร้านใกล้โรงเรียน</h3><span class="pill">🪙 ${state.coins}</span></div>
+        <p class="muted small">แลกเหรียญจากการขยับเป็นส่วนลดจริง สัปดาห์ละ 1 ใบ ใช้ได้ ${L.COUPON_DAYS} วัน · ร้านค้าพาร์ทเนอร์เป็นผู้ออกส่วนลด ไม่มีร้านยาลดน้ำหนัก/อาหารเสริมลดน้ำหนัก</p>
+        ${can ? '' : '<div class="note">สัปดาห์นี้แลกไปแล้ว 1 ใบ แลกใหม่ได้วันจันทร์หน้า 🌱</div>'}
+        <div class="partners">
+          ${D.PARTNERS.map(
+            (p) => `
+            <div class="member">
+              <span class="mini-avatar">${p.emoji}</span>
+              <div class="grow"><b>${esc(p.offer)}</b><br/><small class="muted">${esc(p.name)}</small></div>
+              <button class="btn small" data-action="redeem" data-v="${p.id}"${!can || state.coins < p.cost ? ' disabled' : ''}>🪙 ${p.cost}</button>
+            </div>`
+          ).join('')}
+        </div>
+      </section>
+      ${
+        coupons.length
+          ? `<section class="card"><h3>คูปองของฉัน</h3>
+              ${coupons
+                .map((c) => {
+                  const p = byId(D.PARTNERS, c.partnerId);
+                  const st = L.couponStatus(c, t);
+                  return `<div class="member coupon ${st}" data-action="${st === 'active' ? 'show-coupon' : ''}" data-v="${c.code}">
+                    <span class="mini-avatar">${p.emoji}</span>
+                    <div class="grow"><b>${esc(p.offer)}</b><br/><small class="muted">${esc(p.name)} · ${st === 'active' ? 'หมดอายุ ' + L.addDays(c.issuedKey, L.COUPON_DAYS - 1) : statusText[st]}</small></div>
+                    <span class="pill">${statusText[st]}</span>
+                  </div>`;
+                })
+                .join('')}
+            </section>`
+          : ''
+      }`;
+  }
+
+  function redeem(partnerId) {
+    const p = byId(D.PARTNERS, partnerId);
+    const t = today();
+    if (!p || state.coins < p.cost || !L.canRedeem(state.coupons, t)) return;
+    if (!confirm('ใช้ ' + p.cost + ' เหรียญแลก “' + p.offer + '” ที่' + p.name + '?\nสัปดาห์นี้จะแลกได้แค่ใบนี้')) return;
+    state.coins -= p.cost;
+    const code = 'AL' + String(Math.floor(L.seededRandom(state.profile.nickname + t + partnerId) * 900000) + 100000);
+    state.coupons.push({ partnerId, code, issuedKey: t, usedKey: null });
+    save();
+    render();
+    showCoupon(code);
+  }
+
+  // Pseudo-QR made from the code so each coupon looks distinct.
+  function qrHtml(code) {
+    const cells = Array.from({ length: 81 }, (_, i) => {
+      const r = Math.floor(i / 9);
+      const c = i % 9;
+      const corner = (r < 3 && c < 3) || (r < 3 && c > 5) || (r > 5 && c < 3);
+      return `<span class="${corner || L.seededRandom(code + i) < 0.5 ? 'on' : ''}"></span>`;
+    });
+    return `<div class="qr">${cells.join('')}</div>`;
+  }
+
+  function showCoupon(code) {
+    const c = state.coupons.find((x) => x.code === code);
+    const p = byId(D.PARTNERS, c.partnerId);
+    openModal(`
+      <div class="coupon-ticket">
+        <div class="hero">${p.emoji}</div>
+        <h2>${esc(p.offer)}</h2>
+        <p class="muted">${esc(p.name)}</p>
+        ${qrHtml(c.code)}
+        <p class="code big-code">${c.code}</p>
+        <p class="muted small">ใช้ได้ถึง ${L.addDays(c.issuedKey, L.COUPON_DAYS - 1)} · ให้พนักงานสแกนหรือกดยืนยันที่หน้าร้าน</p>
+      </div>
+      <button class="btn primary big" data-action="use-coupon" data-v="${c.code}">พนักงานกดยืนยันการใช้</button>
+      <button class="btn big ghost-btn" data-action="close-modal">ปิด</button>`);
   }
 
   // ---------- me / settings ----------
@@ -1209,6 +1406,27 @@
     'do-trade'(v, el) {
       doTrade(v, el.dataset.to);
       return 'keep';
+    },
+    'room-view'(v) {
+      state.roomView = v;
+    },
+    'invite-teacher'() {
+      openTeacherInvite();
+      return 'keep';
+    },
+    redeem(v) {
+      redeem(v);
+      return 'keep';
+    },
+    'show-coupon'(v) {
+      showCoupon(v);
+      return 'keep';
+    },
+    'use-coupon'(v) {
+      if (!confirm('ยืนยันว่าพนักงานรับคูปองนี้แล้ว? ใช้ซ้ำไม่ได้')) return 'keep';
+      state.coupons.find((c) => c.code === v).usedKey = today();
+      closeModal();
+      toast('ใช้คูปองแล้ว ขอให้อร่อย/สนุกนะ 💛');
     },
     'next-day'() {
       state.dayOffset++;

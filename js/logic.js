@@ -244,8 +244,82 @@
     return Array.from({ length: size }, (_, i) => pool[Math.floor(seededRandom(seed + '#' + i) * pool.length)]);
   }
 
+  // ---- Inter-school Tournament: 8-school knockout over weeks 2–4 of each season ----
+
+  function tournamentFor(today) {
+    const season = seasonFor(today);
+    const startKey = addDays(season.startKey, 7);
+    const rounds = [0, 1, 2].map((r) => ({ startKey: addDays(startKey, 7 * r), endKey: addDays(startKey, 7 * r + 6) }));
+    let phase = 'live';
+    if (today < startKey) phase = 'upcoming';
+    else if (today > rounds[2].endKey) phase = 'done';
+    return { season: season.number, startKey, rounds, phase };
+  }
+
+  // Score = % of members who moved on at least 3 days that week, so every
+  // student counts the same no matter how athletic they are.
+  const TOURNAMENT_MIN_DAYS = 3;
+
+  function tournamentScore(school, round, today, user) {
+    const members = 30 + Math.floor(seededRandom(school.id + '|members') * 370);
+    const rate = 0.35 + seededRandom(school.id + '|t|' + round.startKey) * 0.4;
+    const progress = Math.min(1, (diffDays(round.startKey, today) + 1) / 7);
+    let done = Math.round(members * rate * progress);
+    let total = members;
+    if (user && user.counted) {
+      total += 1;
+      if (user.days >= TOURNAMENT_MIN_DAYS) done += 1;
+    }
+    return Math.round((done / total) * 1000) / 10;
+  }
+
+  // Plays rounds that have started; a finished round's winners advance (ties go to the first seed).
+  function bracket(seeds, rounds, today, scoreFn) {
+    let alive = seeds.slice();
+    const out = [];
+    for (let r = 0; r < rounds.length; r++) {
+      const round = rounds[r];
+      if (today < round.startKey) break;
+      const finished = today > round.endKey;
+      const matches = [];
+      for (let i = 0; i + 1 < alive.length; i += 2) {
+        const a = alive[i];
+        const b = alive[i + 1];
+        const sa = scoreFn(a, round);
+        const sb = scoreFn(b, round);
+        matches.push({ a, b, sa, sb, winner: finished ? (sa >= sb ? a : b) : null });
+      }
+      out.push({ round: r, finished, matches });
+      if (!finished) break;
+      alive = matches.map((m) => m.winner);
+    }
+    return out;
+  }
+
+  // ---- Local Brand Redemption: one coupon per week, valid 7 days ----
+
+  const COUPON_DAYS = 7;
+
+  function canRedeem(coupons, today) {
+    const wk = weekKey(today);
+    return !coupons.some((c) => weekKey(c.issuedKey) === wk);
+  }
+
+  function couponStatus(coupon, today) {
+    if (coupon.usedKey) return 'used';
+    if (today > addDays(coupon.issuedKey, COUPON_DAYS - 1)) return 'expired';
+    return 'active';
+  }
+
   const api = {
     FREEZES_PER_WEEK,
+    TOURNAMENT_MIN_DAYS,
+    COUPON_DAYS,
+    tournamentFor,
+    tournamentScore,
+    bracket,
+    canRedeem,
+    couponStatus,
     SEASON_DAYS,
     XP_PER_TIER,
     MAX_TIER,

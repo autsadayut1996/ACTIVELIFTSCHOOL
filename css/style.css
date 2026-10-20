@@ -288,6 +288,23 @@ hr { border: 0; border-top: 1px dashed var(--line); margin: 16px 0; }
 .cards.pack .pcard { animation: flip 0.45s ease both; }
 @keyframes flip { from { transform: rotateY(90deg) scale(0.9); opacity: 0; } }
 
+/* phase 3: tournament & coupons */
+.seg.four { grid-template-columns: repeat(4, 1fr); }
+.seg.two { grid-template-columns: repeat(2, 1fr); }
+.match { border: 1.5px solid var(--line); border-radius: 14px; margin-top: 8px; overflow: hidden; }
+.match .side { display: flex; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 0.9rem; }
+.match .side + .side { border-top: 1px dashed var(--line); }
+.match .side.win { background: var(--mint-soft); }
+.match .side.win b::after { content: ' ✓'; }
+.match .side.mine span { font-weight: 500; color: #c2457a; }
+.coupon { cursor: pointer; }
+.coupon.used, .coupon.expired { opacity: 0.5; cursor: default; }
+.coupon-ticket { text-align: center; border: 2px dashed var(--pink); border-radius: var(--radius); padding: 12px; margin-bottom: 8px; }
+.qr { display: grid; grid-template-columns: repeat(9, 1fr); width: 144px; aspect-ratio: 1; margin: 12px auto; gap: 1px; }
+.qr span { background: #fff; }
+.qr span.on { background: var(--ink); border-radius: 2px; }
+.big-code { display: inline-block; font-size: 1.2rem; }
+
 /* modal & toast */
 #modal { position: fixed; inset: 0; z-index: 20; }
 .backdrop { position: absolute; inset: 0; background: rgba(59, 51, 82, 0.35); }

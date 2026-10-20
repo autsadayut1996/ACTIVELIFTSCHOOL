@@ -134,6 +134,19 @@
 
   const RARITY = { common: 'ธรรมดา', rare: 'หายาก', epic: 'ลิมิเต็ด' };
 
+  // Schools that have signed a (simulated) partnership and play in the tournament.
+  const TOURNAMENT_SCHOOLS = ['triam', 'suankularb', 'satri', 'bodin', 'chula', 'tu', 'ku', 'mahidol'];
+  const ROUND_NAMES = ['รอบ 8 ทีม', 'รอบรองชนะเลิศ', 'รอบชิงชนะเลิศ'];
+
+  // Simulated partner shops near school. Partners pay for redemptions; no diet pills or weight-loss products.
+  const PARTNERS = [
+    { id: 'smoothie', name: 'ร้านน้ำปั่นผลไม้หน้าโรงเรียน', emoji: '🥤', offer: 'ฟรีท็อปปิ้ง 1 อย่าง', cost: 80 },
+    { id: 'cafe', name: 'คาเฟ่มุมอ่านหนังสือ', emoji: '☕', offer: 'ลด 10 บาท ทุกเมนูเครื่องดื่ม', cost: 120 },
+    { id: 'court', name: 'สนามแบดใกล้โรงเรียน', emoji: '🏸', offer: 'ลด 20 บาท ค่าคอร์ต 1 ชั่วโมง', cost: 150 },
+    { id: 'sport', name: 'ร้านอุปกรณ์กีฬา', emoji: '👟', offer: 'ลด 10% อุปกรณ์กีฬาทุกชิ้น', cost: 200 },
+    { id: 'dance', name: 'สตูดิโอเต้น K-pop', emoji: '💃', offer: 'คลาสทดลองฟรี 1 ครั้ง', cost: 250 },
+  ];
+
   // Simulated users so groups, buddies and room visits work without a backend.
   const PEOPLE = [
     { name: 'มิ้นท์', avatar: '🐰', level: 'new', freeTime: 'evening', interests: ['dance', 'yoga'], rate: 0.7, items: ['plant', 'poster', 'cat'] },
@@ -168,6 +181,7 @@
   const api = {
     SCHOOLS, ACTIVITIES, AVATARS, LEVELS, FREE_TIMES, MOODS, ITEMS, ACCESSORIES, PEOPLE, CHEERS, ENCOURAGEMENTS, EXIT_REASONS,
     PASS_FREE, PASS_PREMIUM, PASS_PRICES, ACHIEVEMENTS, PHOTOCARDS, RARITY,
+    TOURNAMENT_SCHOOLS, ROUND_NAMES, PARTNERS,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

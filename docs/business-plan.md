@@ -32,7 +32,8 @@ School League + Anti-toxic Gamification + Battle Pass ราคาไทย + Co
 | Phase 2 (เดือน 4–6) | School League Leaderboard (คิดรวมทั้งโรงเรียน) | ✅ (โรงเรียนจำลอง, เฉลี่ยต่อสมาชิก, รายสัปดาห์) |
 | | Battle Pass ซีซั่นแรก (59–99 บาท, cosmetic เท่านั้น) | ✅ (ทดสอบราคา 59 vs 99 แบบ fake door + Parent-pay) |
 | | Collectible Cards | ✅ (การ์ดความสำเร็จ + โฟโต้การ์ด แลกกับเพื่อนได้) |
-| Phase 3 | Inter-school Tournament, Local Brand Redemption | ⏳ |
+| Phase 3 | Inter-school Tournament | ✅ (8 สถาบันพาร์ทเนอร์จำลอง, คะแนนจาก % การมีส่วนร่วม, ปุ่มชวนครูพละสำหรับโรงเรียนที่ยังไม่เข้าร่วม) |
+| | Local Brand Redemption | ✅ (ร้านจำลอง 5 ร้าน, สัปดาห์ละ 1 คูปอง, ไม่มีพาร์ทเนอร์ลดน้ำหนัก) |
 
 ## โมเดลรายได้
 
@@ -46,8 +47,9 @@ Battle Pass / Season Pass ราคาไทย, Cosmetic-only IAP, B2B2C ขา
 3. Metric หลัก: % ที่กลับมาวันที่ 2 และวันที่ 7
 4. **North Star:** % ผู้ใช้ที่กลับมาสัปดาห์ที่ 2 พร้อมเพื่อนอย่างน้อย 1 คน
 5. เก็บไฟล์จาก “ส่งออกข้อมูลทดสอบ” ไว้ดู check-in, อารมณ์ และเหตุผลจาก exit survey
-6. Willingness to pay: เทียบ `fakeDoor.buyClicks / fakeDoor.views` ระหว่างคนที่เห็นราคา 59 กับ 99 บาท (`priceVariant`) และดูสัดส่วน `parentClicks` เพื่อประเมิน Parent-pay Family Plan
-7. ถ้าผลชี้ว่า POV statement ผิด ให้ย้อนกลับไปขั้น Define ไม่ฝืนสร้างฟีเจอร์ต่อ
+6. B2B2C: ดู `fakeDoor.teacherInvites` จากผู้ทดสอบที่โรงเรียนยังไม่เข้าร่วม เพื่อจัดลำดับโรงเรียนที่ควรเข้าไปคุยก่อน และดูว่าผู้ทดสอบแลกคูปองร้านไหน (`coupons`) เพื่อเลือกพาร์ทเนอร์ร้านค้าแรก
+7. Willingness to pay: เทียบ `fakeDoor.buyClicks / fakeDoor.views` ระหว่างคนที่เห็นราคา 59 กับ 99 บาท (`priceVariant`) และดูสัดส่วน `parentClicks` เพื่อประเมิน Parent-pay Family Plan
+8. ถ้าผลชี้ว่า POV statement ผิด ให้ย้อนกลับไปขั้น Define ไม่ฝืนสร้างฟีเจอร์ต่อ
 
 ## หลัก Customer-Centric (ใช้ตรวจทุกฟีเจอร์)
 
@@ -59,6 +61,7 @@ Battle Pass / Season Pass ราคาไทย, Cosmetic-only IAP, B2B2C ขา
 
 ## ข้อจำกัดของ prototype
 
-- League, กลุ่ม, บัดดี้ และการแลกการ์ดใช้ข้อมูลจำลอง ยังไม่มี backend
+- League, ทัวร์นาเมนต์, กลุ่ม, บัดดี้, การแลกการ์ด และร้านค้าพาร์ทเนอร์ใช้ข้อมูลจำลอง ยังไม่มี backend
+- คูปองยังไม่มีระบบฝั่งร้านค้า (ของจริงต้องมีแอป/หน้าเว็บให้พนักงานสแกนและระบบเรียกเก็บค่าพาร์ทเนอร์)
 - รางวัล Battle Pass ชุดเดียวกันจะวนซ้ำในซีซั่นถัดไป (ของจริงต้องออกแบบรางวัลใหม่ทุกซีซั่นจากผลสำรวจ)
 - ยังไม่มีการชำระเงินจริง ปุ่มซื้อเป็น fake door เท่านั้น
