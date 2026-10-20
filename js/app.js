@@ -1,91 +1,49 @@
-// UI for the ActiveLift School prototype. State lives in localStorage only.
+// UI for ActiveLift School. Game rules live in engine.js; data comes from a backend:
+// LocalBackend (offline, simulated friends) or RemoteBackend (the server, real users).
 (function () {
   'use strict';
 
   const L = window.Logic;
   const D = window.Data;
-  const STORAGE_KEY = 'activelift-school-v1';
+  const E = window.Engine;
+  const UI_KEY = 'activelift-ui';
   const app = document.getElementById('app');
   const modalRoot = document.getElementById('modal');
 
-  // ---------- state ----------
+  let backend = null;
+  let snap = null; // latest snapshot: { mode, today, player, social, league, tournament, events, devTools }
+  let queue = Promise.resolve();
+  let pending = 0;
+  let busy = false; // auth form only
+  let authMode = 'register';
 
-  function freshState() {
-    return {
-      version: 1,
-      onboarded: false,
-      onboardStep: 0,
-      dayOffset: 0,
-      profile: {
-        nickname: '',
-        avatar: D.AVATARS[0],
-        schoolId: '',
-        schoolOther: '',
-        unit: '',
-        interests: [],
-        minutes: 15,
-        daysPerWeek: 4,
-        level: 'new',
-        freeTime: 'evening',
-      },
-      startKey: null,
-      checkins: {},
-      xp: 0,
-      coins: 30,
-      owned: ['none'],
-      placed: [],
-      theme: null,
-      acc: 'none',
-      visibility: 'self',
-      invisibleUntil: null,
-      revealPromptDismissed: false,
-      group: null,
-      buddy: null,
-      blocked: [],
-      cheersSent: 0,
-      surveys: [],
-      lastSeenStreak: 0,
-      bestStreak: 0,
-      freezeUsed: false,
-      revealed: false,
-      cards: {},
-      pass: null,
-      priceVariant: null,
-      fakeDoor: { views: 0, buyClicks: 0, parentClicks: 0, teacherInvites: 0 },
-      coupons: [],
-      tab: 'home',
-      seasonView: 'pass',
-      roomView: 'decor',
-    };
+  // ---------- UI-only state (never sent to the server) ----------
+
+  function freshUi() {
+    return { tab: 'home', seasonView: 'pass', roomView: 'decor', onboardStep: 0, draft: E.freshPlayer().profile };
   }
 
-  function load() {
+  const ui = (function () {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) return Object.assign(freshState(), JSON.parse(raw));
+      return Object.assign(freshUi(), JSON.parse(localStorage.getItem(UI_KEY)));
     } catch (e) {
-      /* storage unavailable: fall back to an in-memory session */
+      return freshUi();
     }
-    return freshState();
-  }
+  })();
 
-  let state = load();
-
-  function save() {
+  function saveUi() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(UI_KEY, JSON.stringify(ui));
     } catch (e) {
       /* ignore */
     }
   }
 
-  function today() {
-    const d = new Date();
-    d.setDate(d.getDate() + state.dayOffset);
-    return L.keyFromLocalDate(d);
-  }
-
   // ---------- helpers ----------
+
+  const P = () => snap.player;
+  const today = () => snap.today;
+  const isRemote = () => snap && snap.mode === 'remote';
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -93,24 +51,20 @@
 
   const byId = (list, id) => list.find((x) => x.id === id);
 
-  function schoolName() {
-    const p = state.profile;
+  function schoolName(profile) {
+    const p = profile || P().profile;
     if (p.schoolId === 'other') return p.schoolOther || 'โรงเรียนของฉัน';
     const s = byId(D.SCHOOLS, p.schoolId);
     return s ? s.name : '';
   }
 
-  function unitLabel() {
-    const s = byId(D.SCHOOLS, state.profile.schoolId);
+  function unitLabel(profile) {
+    const s = byId(D.SCHOOLS, (profile || P().profile).schoolId);
     return s && s.type === 'uni' ? 'คณะ' : 'ห้อง';
   }
 
   function streak() {
-    return L.computeStreak(state.checkins, today(), state.startKey);
-  }
-
-  function peopleFor(names) {
-    return names.map((n) => D.PEOPLE.find((p) => p.name === n)).filter(Boolean);
+    return E.streak(P(), today());
   }
 
   const toastQueue = [];
@@ -127,6 +81,7 @@
     if (!el) {
       el = document.createElement('div');
       el.className = 'toast';
+      el.setAttribute('role', 'status');
       document.body.appendChild(el);
     }
     if (!toastQueue.length) {
@@ -150,13 +105,96 @@
     modalRoot.innerHTML = '';
   }
 
+  // Sends an action to the backend, swaps in the new snapshot and re-renders.
+  // Calls run one at a time in order. Resolves with the action result, or null if it
+  // failed (the error is shown as a toast).
+  function run(action, args) {
+    const job = queue.then(() => send(action, args));
+    queue = job.catch(() => {});
+    return job;
+  }
+
+  async function send(action, args) {
+    pending++;
+    document.body.classList.add('busy');
+    try {
+      const res = await backend.call(action, args);
+      setSnapshot(res.snapshot);
+      return res.result || {};
+    } catch (e) {
+      toast(e.message || 'เกิดข้อผิดพลาด');
+      if (e.status === 401) {
+        snap = null;
+        render();
+      }
+      return null;
+    } finally {
+      if (--pending === 0) document.body.classList.remove('busy');
+    }
+  }
+
+  function setSnapshot(s) {
+    snap = s;
+    render();
+    const ev = s && s.events;
+    if (!ev) return;
+    ev.newCards.forEach((id) => {
+      const a = byId(D.ACHIEVEMENTS, id);
+      setTimeout(() => toast('ได้การ์ดใหม่ ' + a.emoji + ' ' + a.name + '!'), 300);
+    });
+    if (ev.askSurvey) setTimeout(() => openSurvey(ev.askSurvey), 50);
+  }
+
+  // ---------- auth (online mode only) ----------
+
+  function renderAuth() {
+    const reg = authMode === 'register';
+    app.innerHTML = `
+      <main class="onboard">
+        <div class="hero">🏸✨</div>
+        <h1 class="center">ActiveLift School</h1>
+        <p class="lead center">${reg ? 'สร้างบัญชีเพื่อขยับกับเพื่อนจริงในโรงเรียน' : 'ยินดีต้อนรับกลับมา 💛'}</p>
+        <div class="seg two">
+          <button class="${reg ? 'on' : ''}" data-action="auth-mode" data-v="register">สมัครใหม่</button>
+          <button class="${reg ? '' : 'on'}" data-action="auth-mode" data-v="login">เข้าสู่ระบบ</button>
+        </div>
+        <form id="auth-form" novalidate>
+          <label class="field">ชื่อผู้ใช้
+            <input id="auth-user" autocomplete="username" autocapitalize="none" maxlength="20" placeholder="เช่น mind_m4" />
+          </label>
+          <label class="field">รหัสผ่าน
+            <input id="auth-pass" type="password" autocomplete="${reg ? 'new-password' : 'current-password'}" maxlength="128" placeholder="${reg ? 'อย่างน้อย 8 ตัว' : ''}" />
+          </label>
+          ${reg ? '<p class="muted small">ไม่ต้องใช้อีเมล เบอร์โทร หรือชื่อจริง ใช้ชื่อผู้ใช้ที่ไม่ได้บอกว่าเป็นใครก็ได้ · a-z, 0-9, _ หรือ . ยาว 3–20 ตัว</p>' : ''}
+          <button class="btn primary big" type="submit">${reg ? 'สร้างบัญชี' : 'เข้าสู่ระบบ'}</button>
+        </form>
+      </main>`;
+  }
+
+  async function submitAuth() {
+    const u = document.getElementById('auth-user').value.trim();
+    const pw = document.getElementById('auth-pass').value;
+    if (busy) return;
+    busy = true;
+    try {
+      const r = authMode === 'register' ? await backend.register(u, pw) : await backend.login(u, pw);
+      ui.onboardStep = 0;
+      saveUi();
+      setSnapshot(r.snapshot);
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      busy = false;
+    }
+  }
+
   // ---------- onboarding ----------
 
   const ONBOARD_STEPS = 5;
 
   function renderOnboarding() {
-    const p = state.profile;
-    const step = state.onboardStep;
+    const p = ui.draft;
+    const step = ui.onboardStep;
     const dots = Array.from({ length: ONBOARD_STEPS }, (_, i) => '<span class="dot' + (i <= step ? ' on' : '') + '"></span>').join('');
     let body = '';
 
@@ -195,8 +233,8 @@
         <label class="field${p.schoolId === 'other' ? '' : ' hidden'}" id="ob-other-wrap">ชื่อสถาบัน
           <input id="ob-other" maxlength="60" value="${esc(p.schoolOther)}" />
         </label>
-        <label class="field">${unitLabel()} (ไม่บังคับ)
-          <input id="ob-unit" maxlength="30" value="${esc(p.unit)}" placeholder="${unitLabel() === 'คณะ' ? 'เช่น วิศวะ, นิเทศ' : 'เช่น ม.4/2'}" />
+        <label class="field">${unitLabel(p)} (ไม่บังคับ)
+          <input id="ob-unit" maxlength="30" value="${esc(p.unit)}" placeholder="${unitLabel(p) === 'คณะ' ? 'เช่น วิศวะ, นิเทศ' : 'เช่น ม.4/2'}" />
         </label>
         <button class="btn primary big" data-action="ob-next">ต่อไป</button>`;
     } else if (step === 3) {
@@ -241,23 +279,23 @@
   }
 
   function readOnboardInputs() {
-    const p = state.profile;
-    const nick = document.getElementById('ob-nick');
-    if (nick) p.nickname = nick.value.trim();
-    const school = document.getElementById('ob-school');
-    if (school) p.schoolId = school.value;
-    const other = document.getElementById('ob-other');
-    if (other) p.schoolOther = other.value.trim();
-    const unit = document.getElementById('ob-unit');
-    if (unit) p.unit = unit.value.trim();
+    const p = ui.draft;
+    const val = (id) => {
+      const el = document.getElementById(id);
+      return el ? el.value.trim() : null;
+    };
+    if (val('ob-nick') !== null) p.nickname = val('ob-nick');
+    if (val('ob-school') !== null) p.schoolId = val('ob-school');
+    if (val('ob-other') !== null) p.schoolOther = val('ob-other');
+    if (val('ob-unit') !== null) p.unit = val('ob-unit');
   }
 
   function validateStep() {
-    const p = state.profile;
-    if (state.onboardStep === 1 && !p.nickname) return 'ใส่ชื่อเล่นก่อนนะ';
-    if (state.onboardStep === 2 && !p.schoolId) return 'เลือกสถาบันก่อนนะ';
-    if (state.onboardStep === 2 && p.schoolId === 'other' && !p.schoolOther) return 'พิมพ์ชื่อสถาบันก่อนนะ';
-    if (state.onboardStep === 3 && p.interests.length === 0) return 'เลือกอย่างน้อย 1 กิจกรรม';
+    const p = ui.draft;
+    if (ui.onboardStep === 1 && !p.nickname) return 'ใส่ชื่อเล่นก่อนนะ';
+    if (ui.onboardStep === 2 && !p.schoolId) return 'เลือกสถาบันก่อนนะ';
+    if (ui.onboardStep === 2 && p.schoolId === 'other' && !p.schoolOther) return 'พิมพ์ชื่อสถาบันก่อนนะ';
+    if (ui.onboardStep === 3 && p.interests.length === 0) return 'เลือกอย่างน้อย 1 กิจกรรม';
     return null;
   }
 
@@ -273,46 +311,44 @@
 
   function renderMain() {
     const s = streak();
-    maybeAskExitSurvey(s);
-    state.lastSeenStreak = s.count;
-    awardAchievements(s);
-    save();
-
     const views = { home: viewHome, room: viewRoom, season: viewSeason, friends: viewFriends, me: viewMe };
+    const badges = { friends: snap.social.cheers.length + snap.social.buddyRequests.length, season: snap.social.tradeOffers.length };
     app.innerHTML = `
       <header class="topbar">
-        <div class="who"><span class="mini-avatar">${state.profile.avatar}</span>${esc(state.profile.nickname)}</div>
+        <div class="who"><span class="mini-avatar">${P().profile.avatar}</span>${esc(P().profile.nickname)}</div>
         <div class="stats">
           <span title="Streak">🔥 ${s.count}</span>
-          <span title="เหรียญ">🪙 ${state.coins}</span>
+          <span title="เหรียญ">🪙 ${P().coins}</span>
         </div>
       </header>
-      <main class="content">${views[state.tab](s)}</main>
+      <main class="content">${views[ui.tab](s)}</main>
       <nav class="tabbar">
-        ${TABS.map((t) => `<button class="tab${state.tab === t.id ? ' on' : ''}" data-action="tab" data-v="${t.id}"><span>${t.icon}</span>${t.name}</button>`).join('')}
+        ${TABS.map((t) => `<button class="tab${ui.tab === t.id ? ' on' : ''}" data-action="tab" data-v="${t.id}"><span>${t.icon}</span>${t.name}${badges[t.id] ? `<i class="dot-badge">${badges[t.id]}</i>` : ''}</button>`).join('')}
       </nav>`;
   }
 
   function render() {
-    if (state.onboarded) renderMain();
-    else renderOnboarding();
+    if (!snap) return renderAuth();
+    if (!P().onboarded) return renderOnboarding();
+    renderMain();
   }
 
   // ---------- home ----------
 
   function viewHome(s) {
-    const lv = L.levelFor(state.xp);
+    const p = P();
+    const lv = L.levelFor(p.xp);
     const t = today();
-    const checkin = state.checkins[t];
-    const invisibleLeft = L.invisibleDaysLeft(state.invisibleUntil, t);
-    const groupInfo = state.group ? L.groupStreak(state.checkins, peopleFor(state.group.members), state.group.createdKey, t) : null;
+    const checkin = p.checkins[t];
+    const invisibleLeft = L.invisibleDaysLeft(p.invisibleUntil, t);
+    const group = snap.social.group;
     const weekDays = Array.from({ length: 7 }, (_, i) => L.addDays(L.weekKey(t), i));
-    const doneThisWeek = weekDays.filter((k) => state.checkins[k]).length;
+    const doneThisWeek = weekDays.filter((k) => p.checkins[k]).length;
 
     let banner = '';
-    if (state.visibility === 'self' && invisibleLeft > 0) {
+    if (p.visibility === 'self' && invisibleLeft > 0) {
       banner = `<div class="banner ghost">👻 โหมดไม่มีใครเห็นเปิดอยู่ (อีก ${invisibleLeft} วัน)<br/><small>XP และ streak ยังสะสมตามปกติ แค่ยังไม่มีใครเห็นคุณ</small></div>`;
-    } else if (state.visibility === 'self' && !state.revealPromptDismissed) {
+    } else if (p.visibility === 'self' && !p.revealPromptDismissed) {
       banner = `<div class="banner">พร้อมให้กลุ่มเพื่อนสนิทเห็น streak และมินิรูมหรือยัง? 🌷
         <div class="row"><button class="btn small primary" data-action="reveal-friends">ให้เพื่อนสนิทเห็น</button>
         <button class="btn small" data-action="reveal-later">ยังก่อน</button></div></div>`;
@@ -326,7 +362,7 @@
           <p class="muted">+${checkin.xp} XP · +${checkin.coins} 🪙 ${checkin.mood ? '· ' + byId(D.MOODS, checkin.mood).emoji : ''}</p>
         </section>`
       : `<section class="card cta">
-          <p class="muted">เป้าวันนี้: ขยับ ${state.profile.minutes} นาที แบบไหนก็ได้</p>
+          <p class="muted">เป้าวันนี้: ขยับ ${p.profile.minutes} นาที แบบไหนก็ได้</p>
           <button class="btn primary big" data-action="open-checkin">✅ เช็คอินวันนี้</button>
           <p class="muted small">ทำได้บางส่วนก็นับนะ ไม่ต้องสมบูรณ์แบบ</p>
         </section>`;
@@ -338,24 +374,23 @@
         <div class="row between"><h3>🔥 Streak ${s.count} วัน</h3><span class="pill">❄️ เหลือ ${s.freezesLeftThisWeek}/${L.FREEZES_PER_WEEK}</span></div>
         <div class="week">
           ${weekDays
-            .map((k) => {
-              const cls = state.checkins[k] ? 'on' : s.frozenDays.includes(k) ? 'frozen' : k === t ? 'today' : '';
-              const label = ['จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส', 'อา'][weekDays.indexOf(k)];
-              return `<div class="day ${cls}"><span>${state.checkins[k] ? '✓' : s.frozenDays.includes(k) ? '❄️' : ''}</span>${label}</div>`;
+            .map((k, i) => {
+              const cls = p.checkins[k] ? 'on' : s.frozenDays.includes(k) ? 'frozen' : k === t ? 'today' : '';
+              return `<div class="day ${cls}"><span>${p.checkins[k] ? '✓' : s.frozenDays.includes(k) ? '❄️' : ''}</span>${['จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส', 'อา'][i]}</div>`;
             })
             .join('')}
         </div>
-        <p class="muted small">สัปดาห์นี้ ${doneThisWeek}/${state.profile.daysPerWeek} วันตามที่ตั้งใจ ${doneThisWeek >= state.profile.daysPerWeek ? '🎉 ครบแล้ว!' : ''}</p>
+        <p class="muted small">สัปดาห์นี้ ${doneThisWeek}/${p.profile.daysPerWeek} วันตามที่ตั้งใจ ${doneThisWeek >= p.profile.daysPerWeek ? '🎉 ครบแล้ว!' : ''}</p>
       </section>
       <section class="card">
         <div class="row between"><h3>Lv.${lv.level} ${esc(lv.title)}</h3><span class="muted small">${lv.into}/${lv.need} XP</span></div>
         <div class="bar"><div style="width:${(lv.into / lv.need) * 100}%"></div></div>
       </section>
       ${
-        groupInfo
+        group
           ? `<section class="card link" data-action="tab" data-v="friends">
-              <h3>👯 ${esc(state.group.name)}</h3>
-              <p>Group streak <b>${groupInfo.count} วัน</b> · วันนี้ต้องมีคนเช็คอิน ${groupInfo.need}/${groupInfo.total} คน</p>
+              <h3>👯 ${esc(group.name)}</h3>
+              <p>Group streak <b>${group.streak} วัน</b> · ${group.countsToday ? 'วันนี้ผ่านแล้ว 🎉' : `วันนี้ต้องเช็คอินอีก ${group.remaining} คน`}</p>
             </section>`
           : `<section class="card link" data-action="tab" data-v="friends">
               <h3>🤝 ยังไม่มีกลุ่มเพื่อนสนิท</h3>
@@ -366,8 +401,8 @@
   }
 
   function openCheckin() {
-    const p = state.profile;
-    const acts = p.interests.length ? D.ACTIVITIES.filter((a) => p.interests.includes(a.id)).concat(D.ACTIVITIES.filter((a) => !p.interests.includes(a.id))) : D.ACTIVITIES;
+    const p = P().profile;
+    const acts = D.ACTIVITIES.filter((a) => p.interests.includes(a.id)).concat(D.ACTIVITIES.filter((a) => !p.interests.includes(a.id)));
     openModal(`
       <h2>วันนี้ขยับอะไรไป?</h2>
       <div class="chips" id="ci-acts">
@@ -392,60 +427,41 @@
     if (!(optional && wasOn)) btn.classList.add('on');
   }
 
-  function submitCheckin() {
+  async function submitCheckin() {
     const sel = (id) => {
       const el = document.querySelector('#' + id + ' .chip.on');
       return el ? el.dataset.v : null;
     };
-    const t = today();
-    if (state.checkins[t]) return closeModal();
-    const before = streak().count;
-    const kind = sel('ci-kind') || 'full';
-    const reward = L.rewardFor(kind, before);
-    const message = D.ENCOURAGEMENTS[Math.floor(L.seededRandom(t + state.profile.nickname) * D.ENCOURAGEMENTS.length)];
-    state.checkins[t] = { activity: sel('ci-acts') || 'walk', kind, mood: sel('ci-mood'), xp: reward.xp, coins: reward.coins, message };
-    const prevLevel = L.levelFor(state.xp).level;
-    state.xp += reward.xp;
-    state.coins += reward.coins;
-    const after = streak().count;
-    const unlocked = D.ITEMS.concat(D.ACCESSORIES).filter((i) => i.unlock && after >= i.unlock.streak && !state.owned.includes(i.id));
-    unlocked.forEach((i) => state.owned.push(i.id));
-    save();
+    const args = { activity: sel('ci-acts'), kind: sel('ci-kind') || 'full', mood: sel('ci-mood') };
     closeModal();
-    render();
-    const lv = L.levelFor(state.xp);
+    const r = await run('checkin', args);
+    if (!r) return;
+    const unlocked = r.unlocked.map((id) => E.findItem(id));
     if (unlocked.length) toast('ปลดล็อก ' + unlocked.map((i) => i.emoji + ' ' + i.name).join(', ') + '!');
-    else if (lv.level > prevLevel) toast('เลเวลอัป! Lv.' + lv.level + ' ' + lv.title + ' 🎉');
-    else toast(message);
+    else if (r.levelUp) toast('เลเวลอัป! Lv.' + r.levelUp + ' ' + L.levelFor(P().xp).title + ' 🎉');
+    else toast(r.message);
   }
 
   // ---------- exit survey (listen to the people who stop) ----------
 
-  function maybeAskExitSurvey(s) {
-    const t = today();
-    const prev = state.lastSeenStreak;
-    if (s.count === 0 && prev >= 2 && !state.surveys.some((x) => x.key === t)) {
-      setTimeout(() => {
-        openModal(`
-          <div class="hero">💛</div>
-          <h2>ไม่เป็นไรเลยนะ พักได้</h2>
-          <p class="muted">streak ${prev} วันที่ผ่านมาไม่ได้หายไปไหน มันคือสิ่งที่คุณทำได้จริง<br/>อยากบอกเราไหมว่าช่วงนี้เป็นยังไงบ้าง? (ไม่บังคับ)</p>
-          <div class="chips">${D.EXIT_REASONS.map((r) => `<button class="chip" data-action="survey" data-v="${esc(r)}">${esc(r)}</button>`).join('')}</div>
-          <button class="btn" data-action="survey" data-v="">ข้ามไปก่อน</button>`);
-      }, 50);
-      state.surveys.push({ key: t, reason: null, streak: prev });
-    }
+  function openSurvey(prev) {
+    openModal(`
+      <div class="hero">💛</div>
+      <h2>ไม่เป็นไรเลยนะ พักได้</h2>
+      <p class="muted">streak ${prev} วันที่ผ่านมาไม่ได้หายไปไหน มันคือสิ่งที่คุณทำได้จริง<br/>อยากบอกเราไหมว่าช่วงนี้เป็นยังไงบ้าง? (ไม่บังคับ)</p>
+      <div class="chips">${D.EXIT_REASONS.map((r) => `<button class="chip" data-action="survey" data-v="${esc(r)}">${esc(r)}</button>`).join('')}</div>
+      <button class="btn" data-action="survey" data-v="">ข้ามไปก่อน</button>`);
   }
 
   // ---------- mini room ----------
 
   function roomHtml(placed, theme, avatar, acc, badge) {
-    const th = theme ? byId(D.ITEMS, theme).theme : { wall: '#fdf0f6', floor: '#f3d9e6' };
+    const th = theme && byId(D.ITEMS, theme) ? byId(D.ITEMS, theme).theme : { wall: '#fdf0f6', floor: '#f3d9e6' };
     const accItem = byId(D.ACCESSORIES, acc);
     return `
       <div class="room" style="--wall:${th.wall};--floor:${th.floor}">
         <div class="wall"></div><div class="floor"></div>
-        ${placed
+        ${(placed || [])
           .map((id) => byId(D.ITEMS, id))
           .filter((i) => i && !i.theme)
           .map((i) => `<span class="item" style="left:${i.x}%;top:${i.y}%;font-size:${i.size}rem" title="${esc(i.name)}">${i.emoji}</span>`)
@@ -456,23 +472,25 @@
   }
 
   function viewRoom() {
-    const visibleTo = { self: 'เฉพาะคุณ 👻', friends: 'กลุ่มเพื่อนสนิท', class: unitLabel() + 'และเพื่อนสนิท', school: 'ทั้งโรงเรียน' }[state.visibility];
-    // Season exclusives only appear once earned from the Battle Pass.
-    const shopItems = D.ITEMS.concat(D.ACCESSORIES.filter((a) => a.id !== 'none')).filter((i) => !i.season || state.owned.includes(i.id));
+    const p = P();
+    const visibleTo = { self: 'เฉพาะคุณ 👻', friends: 'กลุ่มเพื่อนสนิท', class: unitLabel() + 'และเพื่อนสนิท', school: 'ทั้งโรงเรียน' }[p.visibility];
     return `
       <section class="card">
-        <div class="row between"><h3>ห้องของ${esc(state.profile.nickname)}</h3><span class="pill">มองเห็นโดย: ${visibleTo}</span></div>
-        ${roomHtml(state.placed, state.theme, state.profile.avatar, state.acc, schoolBadge())}
+        <div class="row between"><h3>ห้องของ${esc(p.profile.nickname)}</h3><span class="pill">มองเห็นโดย: ${visibleTo}</span></div>
+        ${roomHtml(p.placed, p.theme, p.profile.avatar, p.acc, schoolBadge())}
         <p class="muted small">ขยับครบ = ได้เหรียญมาแต่งห้อง แต่งเสร็จแคปไปลงสตอรี่ได้เลย 📸</p>
       </section>
       <div class="seg two">
-        <button class="${state.roomView === 'decor' ? 'on' : ''}" data-action="room-view" data-v="decor">🛋️ ของแต่ง</button>
-        <button class="${state.roomView === 'coupons' ? 'on' : ''}" data-action="room-view" data-v="coupons">🎁 คูปองร้านค้า</button>
+        <button class="${ui.roomView === 'decor' ? 'on' : ''}" data-action="room-view" data-v="decor">🛋️ ของแต่ง</button>
+        <button class="${ui.roomView === 'coupons' ? 'on' : ''}" data-action="room-view" data-v="coupons">🎁 คูปองร้านค้า</button>
       </div>
-      ${state.roomView === 'coupons' ? viewCoupons() : viewShop(shopItems)}`;
+      ${ui.roomView === 'coupons' ? viewCoupons() : viewShop()}`;
   }
 
-  function viewShop(shopItems) {
+  function viewShop() {
+    const p = P();
+    // Season exclusives only appear once earned from the Battle Pass.
+    const shopItems = D.ITEMS.concat(D.ACCESSORIES.filter((a) => a.id !== 'none')).filter((i) => !i.season || p.owned.includes(i.id));
     return `
       <section class="card">
         <h3>ของในห้อง & ร้านค้า</h3>
@@ -480,13 +498,13 @@
         <div class="shop">
           ${shopItems
             .map((i) => {
-              const owned = state.owned.includes(i.id);
+              const owned = p.owned.includes(i.id);
               const isAcc = Boolean(byId(D.ACCESSORIES, i.id));
-              const active = isAcc ? state.acc === i.id : i.theme ? state.theme === i.id : state.placed.includes(i.id);
+              const active = isAcc ? p.acc === i.id : i.theme ? p.theme === i.id : p.placed.includes(i.id);
               let btn;
               if (owned) btn = `<button class="btn small${active ? ' primary' : ''}" data-action="toggle-item" data-v="${i.id}">${active ? 'ใช้อยู่' : 'ใช้'}</button>`;
               else if (i.unlock) btn = `<span class="pill">🔒 streak ${i.unlock.streak}</span>`;
-              else btn = `<button class="btn small" data-action="buy" data-v="${i.id}"${state.coins < i.cost ? ' disabled' : ''}>🪙 ${i.cost}</button>`;
+              else btn = `<button class="btn small" data-action="buy" data-v="${i.id}"${p.coins < i.cost ? ' disabled' : ''}>🪙 ${i.cost}</button>`;
               return `<div class="shop-item"><span class="shop-emoji">${i.emoji}</span><span class="shop-name">${esc(i.name)}</span>${btn}</div>`;
             })
             .join('')}
@@ -494,59 +512,75 @@
       </section>`;
   }
 
-  function buy(id) {
-    const item = byId(D.ITEMS, id) || byId(D.ACCESSORIES, id);
-    if (!item || state.owned.includes(id) || state.coins < item.cost) return;
-    state.coins -= item.cost;
-    state.owned.push(id);
-    toggleItem(id);
-    toast('ได้ ' + item.emoji + ' ' + item.name + ' แล้ว!');
+  // ---------- friends: close-friends group, buddy, cheers ----------
+
+  function progressText(m) {
+    if (m.streak === null) return '👻 ยังไม่เปิดให้เห็น';
+    return `🔥 ${m.streak} วัน · ${m.checkedToday ? 'ขยับแล้ว ✓' : 'ยังไม่ขยับ'}`;
   }
 
-  function toggleItem(id) {
-    if (byId(D.ACCESSORIES, id)) state.acc = state.acc === id ? 'none' : id;
-    else if (byId(D.ITEMS, id).theme) state.theme = state.theme === id ? null : id;
-    else if (state.placed.includes(id)) state.placed = state.placed.filter((x) => x !== id);
-    else state.placed.push(id);
-    save();
-    render();
-  }
-
-  // ---------- friends: close-friends group + buddy matching ----------
-
-  function memberRow(person, t) {
-    const done = L.mockChecked(person, t);
+  function memberRow(m) {
     return `
       <div class="member">
-        <span class="mini-avatar">${person.avatar}</span>
-        <div class="grow"><b>${esc(person.name)}</b><br/><small class="muted">🔥 ${L.mockStreak(person, t)} วัน · ${done ? 'ขยับแล้ว ✓' : 'ยังไม่ขยับ'}</small></div>
-        <button class="btn small" data-action="cheer" data-v="${esc(person.name)}">💌 เชียร์</button>
-        <button class="btn small ghost-btn" data-action="visit" data-v="${esc(person.name)}" aria-label="เยี่ยมห้อง">🏠</button>
+        <span class="mini-avatar">${m.avatar}</span>
+        <div class="grow"><b>${esc(m.name)}</b><br/><small class="muted">${progressText(m)}</small></div>
+        <button class="btn small" data-action="cheer" data-v="${esc(m.id)}">💌 เชียร์</button>
+        ${m.room ? `<button class="btn small ghost-btn" data-action="visit" data-v="${esc(m.id)}" aria-label="เยี่ยมห้อง">🏠</button>` : ''}
       </div>`;
   }
 
+  function friends() {
+    const s = snap.social;
+    const list = s.group ? s.group.members.slice() : [];
+    if (s.buddy && (s.buddy.status === 'trial' || s.buddy.status === 'linked') && !list.some((m) => m.id === s.buddy.id)) list.push(s.buddy);
+    return list;
+  }
+
+  const findFriend = (id) => friends().find((m) => String(m.id) === String(id));
+
   function viewFriends() {
+    const p = P();
+    const s = snap.social;
     const t = today();
     const parts = [];
 
-    if (state.visibility === 'self') {
+    if (s.cheers.length) {
+      parts.push(`
+        <section class="card inbox">
+          <h3>💌 กำลังใจจากเพื่อน</h3>
+          ${s.cheers.map((c) => `<div class="member"><span class="mini-avatar">${c.avatar}</span><div class="grow"><b>${esc(c.name)}</b><br/><small>${esc(c.message)}</small></div></div>`).join('')}
+          <button class="btn small" data-action="cheers-read">อ่านแล้ว</button>
+        </section>`);
+    }
+
+    if (s.buddy && s.buddy.status === 'pending_in') {
+      parts.push(`
+        <section class="card inbox">
+          <h3>🫶 ${esc(s.buddy.name)} อยากเป็นบัดดี้ขยับด้วยกัน</h3>
+          <p class="muted small">อยู่สถาบันเดียวกับคุณ · ลองคุยกัน ${L.BUDDY_TRIAL_DAYS} วันก่อน ไม่ถูกคอก็แยกกันได้ · ไม่แชร์ข้อมูลติดต่อ</p>
+          <div class="row"><button class="btn small primary" data-action="buddy-respond" data-v="yes">ลองดู</button>
+          <button class="btn small" data-action="buddy-respond" data-v="no">ไม่เป็นไร ขอบคุณ</button></div>
+        </section>`);
+    }
+
+    if (p.visibility === 'self') {
       parts.push(`<div class="banner ghost">👻 ตอนนี้เพื่อนยังไม่เห็น streak และมินิรูมของคุณ แต่คุณส่งกำลังใจให้เพื่อนได้ตามปกติ
         <div class="row"><button class="btn small" data-action="tab" data-v="me">ตั้งค่าการมองเห็น</button></div></div>`);
     }
 
-    if (state.group) {
-      const members = peopleFor(state.group.members).filter((m) => !state.blocked.includes(m.name));
-      const g = L.groupStreak(state.checkins, members, state.group.createdKey, t);
+    if (s.group) {
+      const g = s.group;
       parts.push(`
         <section class="card">
-          <div class="row between"><h3>👯 ${esc(state.group.name)}</h3><span class="pill">${members.length + 1}/10 คน</span></div>
-          <p>Group streak <b>${g.count} วัน</b> ${g.countsToday ? '— วันนี้ผ่านแล้ว 🎉' : `— วันนี้ต้องเช็คอินอีก ${Math.max(0, g.need - (state.checkins[t] ? 1 : 0) - members.filter((m) => L.mockChecked(m, t)).length)} คน`}</p>
+          <div class="row between"><h3>👯 ${esc(g.name)}</h3><span class="pill">${g.total}/10 คน</span></div>
+          <p>Group streak <b>${g.streak} วัน</b> ${g.countsToday ? '— วันนี้ผ่านแล้ว 🎉' : `— วันนี้ต้องเช็คอินอีก ${g.remaining} คน`}</p>
           <p class="muted small">streak รวมจะไปต่อเมื่อเพื่อนครึ่งหนึ่งขยับในวันนั้น ช่วยกันรักษานะ</p>
           <div class="members">
-            <div class="member"><span class="mini-avatar">${state.profile.avatar}</span><div class="grow"><b>${esc(state.profile.nickname)} (คุณ)</b><br/><small class="muted">🔥 ${streak().count} วัน · ${state.checkins[t] ? 'ขยับแล้ว ✓' : 'ยังไม่ขยับ'}</small></div></div>
-            ${members.map((m) => memberRow(m, t)).join('')}
+            <div class="member"><span class="mini-avatar">${p.profile.avatar}</span><div class="grow"><b>${esc(p.profile.nickname)} (คุณ)</b><br/><small class="muted">🔥 ${streak().count} วัน · ${p.checkins[t] ? 'ขยับแล้ว ✓' : 'ยังไม่ขยับ'}</small></div></div>
+            ${g.members.map(memberRow).join('')}
           </div>
-          <p class="muted small">รหัสชวนเพื่อน: <b class="code">${esc(state.group.code)}</b></p>
+          ${!g.members.length && isRemote() ? '<p class="muted small">ยังไม่มีเพื่อนในกลุ่ม ส่งรหัสด้านล่างให้เพื่อนสนิทเลย</p>' : ''}
+          <p class="muted small">รหัสชวนเพื่อน: <b class="code">${esc(g.code)}</b></p>
           <button class="btn small" data-action="leave-group">ออกจากกลุ่ม</button>
         </section>`);
     } else {
@@ -557,125 +591,116 @@
           <label class="field">ตั้งชื่อกลุ่ม<input id="group-name" maxlength="30" placeholder="เช่น แก๊ง ม.5/3 ขยับทุกวัน" /></label>
           <button class="btn primary" data-action="create-group">สร้างกลุ่ม</button>
           <hr/>
-          <label class="field">มีรหัสจากเพื่อนแล้ว?<input id="group-code" maxlength="8" placeholder="เช่น AL-4821" /></label>
+          <label class="field">มีรหัสจากเพื่อนแล้ว?<input id="group-code" maxlength="10" placeholder="เช่น AL-K7Q2MX" autocapitalize="characters" /></label>
           <button class="btn" data-action="join-group">เข้าร่วมกลุ่ม</button>
         </section>`);
     }
 
-    parts.push(viewBuddy(t));
+    parts.push(viewBuddy());
     return parts.join('');
   }
 
-  function viewBuddy(t) {
-    const b = state.buddy;
-    if (b) {
-      const person = D.PEOPLE.find((p) => p.name === b.name);
-      const daysIn = L.diffDays(b.startKey, t);
-      const trialLeft = Math.max(0, L.BUDDY_TRIAL_DAYS - daysIn);
+  function viewBuddy() {
+    const b = snap.social.buddy;
+    if (b && b.status !== 'pending_in') {
+      let body;
+      if (b.status === 'pending_out') {
+        body = `<p class="muted small">ส่งคำขอแล้ว รอ${esc(b.name)}ตอบรับ</p><button class="btn small" data-action="buddy-end">ยกเลิกคำขอ</button>`;
+      } else if (b.status === 'trial' && b.trialLeft > 0) {
+        body = `<p class="muted small">ช่วงลองคุยกัน: เหลืออีก ${b.trialLeft} วัน ก่อนตัดสินใจผูก streak ร่วมกัน</p>`;
+      } else if (b.status === 'trial' && b.iConfirmed) {
+        body = `<p class="muted small">คุณยืนยันแล้ว รอ${esc(b.name)}ยืนยันอยู่ 💞</p>`;
+      } else if (b.status === 'trial') {
+        body = `<p>ครบ ${L.BUDDY_TRIAL_DAYS} วันแล้ว อยากเป็นบัดดี้กันต่อไหม?</p>
+          <div class="row"><button class="btn small primary" data-action="buddy-link">ผูก streak ร่วมกัน</button>
+          <button class="btn small" data-action="buddy-end">ไม่เป็นไร ขอบคุณนะ</button></div>`;
+      } else {
+        body = '<p class="muted small">เป็นบัดดี้กันแล้ว 💞 เห็น streak ของกันและกันได้ตลอด</p>';
+      }
       return `
         <section class="card">
           <h3>🫶 บัดดี้ของคุณ</h3>
-          ${memberRow(person, t)}
-          ${
-            b.status === 'trial'
-              ? trialLeft > 0
-                ? `<p class="muted small">ช่วงลองคุยกัน: เหลืออีก ${trialLeft} วัน ก่อนตัดสินใจผูก streak ร่วมกัน</p>`
-                : `<p>ครบ ${L.BUDDY_TRIAL_DAYS} วันแล้ว อยากเป็นบัดดี้กันต่อไหม?</p>
-                   <div class="row"><button class="btn small primary" data-action="buddy-link">ผูก streak ร่วมกัน</button>
-                   <button class="btn small" data-action="buddy-end">ไม่เป็นไร ขอบคุณนะ</button></div>`
-              : '<p class="muted small">ผูก streak ร่วมกันแล้ว 💞 ข้อมูลติดต่อแลกกันได้เพราะทั้งคู่ยืนยันแล้ว</p>'
-          }
-          <p class="muted small">🔒 ไม่แชร์ข้อมูลติดต่อส่วนตัวจนกว่าทั้งคู่ยืนยัน</p>
-          <button class="btn small danger" data-action="buddy-report">รายงาน / บล็อก</button>
+          ${b.status === 'pending_out' ? `<div class="member"><span class="mini-avatar">${b.avatar}</span><div class="grow"><b>${esc(b.name)}</b></div></div>` : memberRow(b)}
+          ${body}
+          <p class="muted small">🔒 ไม่มีแชทอิสระและไม่แชร์ข้อมูลติดต่อส่วนตัว ส่งได้แค่ข้อความให้กำลังใจ</p>
+          ${b.status === 'pending_out' ? '' : '<button class="btn small danger" data-action="buddy-report">รายงาน / บล็อก</button>'}
         </section>`;
     }
+    if (b) return '';
+    const looking = P().lookingForBuddy;
     return `
       <section class="card">
         <h3>🫶 หาบัดดี้ขยับด้วยกัน</h3>
         <p class="muted">ยังไม่มีเพื่อนมาด้วย? เราจับคู่ให้จากสถาบันเดียวกัน ดูจากระดับการขยับ เวลาว่าง และกิจกรรมที่ชอบ — ไม่ดูรูปร่างหน้าตา</p>
         <button class="btn primary" data-action="find-buddy">หาบัดดี้ให้หน่อย</button>
+        ${
+          looking
+            ? `<p class="muted small">คุณเปิดรับบัดดี้อยู่: คนในสถาบันเดียวกันที่กำลังหาบัดดี้จะเห็นชื่อเล่นและตัวละครของคุณ (ไม่เห็นข้อมูลอื่น)</p>
+               <button class="btn small" data-action="buddy-stop-looking">ปิดการรับบัดดี้</button>`
+            : ''
+        }
       </section>`;
   }
 
-  function findBuddy() {
-    const taken = state.group ? state.group.members : [];
-    const candidates = D.PEOPLE.filter((p) => !state.blocked.includes(p.name) && !taken.includes(p.name))
-      .map((p) => Object.assign({ person: p }, L.buddyScore(state.profile, p)))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
-    if (!candidates.length) return toast('ตอนนี้ยังไม่มีคนที่เหมาะ ลองใหม่พรุ่งนี้นะ');
+  async function findBuddy() {
+    const r = await run('buddy-find');
+    if (!r) return;
+    if (!r.candidates.length) {
+      openModal(`
+        <h2>ยังไม่มีคนที่กำลังหาบัดดี้</h2>
+        <p class="muted">ตอนนี้คุณเปิดรับบัดดี้แล้ว เมื่อมีคนใน${esc(schoolName())}ที่กำลังหาบัดดี้ เขาจะส่งคำขอมาที่หน้านี้ หรือลองกดหาใหม่ภายหลังนะ</p>
+        <button class="btn primary big" data-action="close-modal">โอเค</button>`);
+      return;
+    }
     openModal(`
       <h2>บัดดี้ที่น่าจะเข้ากัน</h2>
       <p class="muted small">ทุกคนอยู่ ${esc(schoolName())} · ลองคุยกัน ${L.BUDDY_TRIAL_DAYS} วันก่อน ไม่ถูกคอก็แยกกันได้ไม่ต้องเกรงใจ</p>
-      ${candidates
+      ${r.candidates
         .map(
           (c) => `
         <div class="member">
-          <span class="mini-avatar">${c.person.avatar}</span>
-          <div class="grow"><b>${esc(c.person.name)}</b><br/><small class="muted">${c.shared.map((id) => byId(D.ACTIVITIES, id).emoji + ' ' + byId(D.ACTIVITIES, id).name).concat(c.reasons).join(' · ') || 'อยากลองขยับเหมือนกัน'}</small></div>
-          <button class="btn small primary" data-action="pick-buddy" data-v="${esc(c.person.name)}">ลองคุย</button>
+          <span class="mini-avatar">${c.avatar}</span>
+          <div class="grow"><b>${esc(c.name)}</b><br/><small class="muted">${c.shared.map((id) => byId(D.ACTIVITIES, id).emoji + ' ' + byId(D.ACTIVITIES, id).name).concat(c.reasons).join(' · ') || 'อยากลองขยับเหมือนกัน'}</small></div>
+          <button class="btn small primary" data-action="pick-buddy" data-v="${esc(c.id)}">ลองคุย</button>
         </div>`
         )
         .join('')}`);
   }
 
-  function visitRoom(name) {
-    const p = D.PEOPLE.find((x) => x.name === name);
+  function visitRoom(id) {
+    const m = findFriend(id);
+    if (!m || !m.room) return toast('เพื่อนยังไม่เปิดให้เห็นห้อง');
     openModal(`
-      <h2>ห้องของ${esc(p.name)}</h2>
-      ${roomHtml(p.items, null, p.avatar, 'none')}
-      <div class="chips">${D.CHEERS.map((c) => `<button class="chip" data-action="cheer-msg" data-to="${esc(p.name)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`);
+      <h2>ห้องของ${esc(m.name)}</h2>
+      ${roomHtml(m.room.placed, m.room.theme, m.avatar, m.room.acc)}
+      ${cheerChips(m)}`);
   }
 
-  function openCheer(name) {
-    openModal(`
-      <h2>ส่งกำลังใจให้${esc(name)}</h2>
-      <p class="muted small">ข้อความสำเร็จรูปเท่านั้น เพื่อให้ทุกคนปลอดภัย</p>
-      <div class="chips">${D.CHEERS.map((c) => `<button class="chip" data-action="cheer-msg" data-to="${esc(name)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`);
+  function cheerChips(m) {
+    return `<div class="chips">${D.CHEERS.map((c) => `<button class="chip" data-action="cheer-msg" data-to="${esc(m.id)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
   }
+
+  function openCheer(id) {
+    const m = findFriend(id);
+    if (!m) return;
+    openModal(`
+      <h2>ส่งกำลังใจให้${esc(m.name)}</h2>
+      <p class="muted small">ข้อความสำเร็จรูปเท่านั้น เพื่อให้ทุกคนปลอดภัย</p>
+      ${cheerChips(m)}`);
+  }
+
+  // Local ids are names; server ids are numbers.
+  const friendId = (v) => (isRemote() ? Number(v) : v);
 
   // ---------- season: Battle Pass, School League, collectible cards ----------
 
-  function playerStats(s) {
-    const list = Object.values(state.checkins);
-    return {
-      total: list.length,
-      partial: list.filter((c) => c.kind === 'partial').length,
-      bestStreak: state.bestStreak,
-      freezeUsed: state.freezeUsed ? 1 : 0,
-      activities: new Set(list.map((c) => c.activity)).size,
-      group: state.group ? 1 : 0,
-      buddy: state.buddy ? 1 : 0,
-      cheers: state.cheersSent,
-      revealed: state.revealed ? 1 : 0,
-    };
-  }
-
-  function awardAchievements(s) {
-    state.bestStreak = Math.max(state.bestStreak, s.count);
-    if (s.frozenDays.length) state.freezeUsed = true;
-    if (state.visibility !== 'self') state.revealed = true;
-    const fresh = L.achievementsEarned(D.ACHIEVEMENTS, playerStats(s)).filter((id) => !state.cards[id]);
-    fresh.forEach((id) => {
-      state.cards[id] = 1;
-      const a = byId(D.ACHIEVEMENTS, id);
-      setTimeout(() => toast('ได้การ์ดใหม่ ' + a.emoji + ' ' + a.name + '!'), 300);
-    });
-  }
-
-  function weekXp() {
-    return L.xpBetween(state.checkins, L.weekKey(today()), today());
-  }
-
-  function leagueRows() {
-    const schools = D.SCHOOLS.filter((x) => x.id !== 'other');
-    if (state.profile.schoolId === 'other') schools.push({ id: 'other', name: schoolName() });
-    return L.schoolLeague(schools, state.profile.schoolId, weekXp(), state.visibility === 'school', today());
+  function myLeagueRow() {
+    return snap.league.find((r) => r.mine);
   }
 
   function schoolBadge() {
-    if (state.visibility !== 'school') return '';
-    const mine = leagueRows().find((r) => r.mine);
+    if (P().visibility !== 'school') return '';
+    const mine = myLeagueRow();
     return mine ? '🏫 #' + mine.rank : '';
   }
 
@@ -683,31 +708,15 @@
     return confirm('เปิดให้ทั้งโรงเรียนเห็น?\n\nคนในโรงเรียนจะเห็นชื่อเล่นและมินิรูมของคุณ และ XP ของคุณจะถูกนับเข้า School League (อันดับเป็นของโรงเรียน ไม่มีอันดับรายบุคคล)\nเปลี่ยนกลับได้ตลอด');
   }
 
-  function passState() {
-    const season = L.seasonFor(today());
-    if (!state.pass || state.pass.season !== season.number) {
-      state.pass = { season: season.number, premium: false, claimedFree: [], claimedPremium: [] };
-    }
-    if (!state.priceVariant) state.priceVariant = D.PASS_PRICES[Math.floor(Math.random() * D.PASS_PRICES.length)];
-    return state.pass;
-  }
-
-  function rewardLabel(r) {
-    if (r.coins) return '🪙 ' + r.coins;
-    if (r.pack) return '🃏 การ์ด ' + r.pack + ' แพ็ก';
-    const item = byId(D.ITEMS, r.item) || byId(D.ACCESSORIES, r.item);
-    return item.emoji + ' ' + item.name;
-  }
-
   function homeSeasonCard(t) {
     const season = L.seasonFor(t);
-    const tier = L.tierFor(L.xpBetween(state.checkins, season.startKey, t));
-    const mine = leagueRows().find((r) => r.mine);
+    const tier = E.seasonTier(P(), t);
+    const mine = myLeagueRow();
     return `
       <section class="card soon link" data-action="tab" data-v="season">
         <div class="row between"><h3>🏆 ซีซั่น ${season.number}</h3><span class="pill">เหลือ ${season.daysLeft} วัน</span></div>
-        <p class="small">Battle Pass tier <b>${tier.tier}/${L.MAX_TIER}</b> · ${esc(schoolName())} อันดับ <b>#${mine ? mine.rank : '-'}</b> สัปดาห์นี้</p>
-        <p class="muted small">${state.visibility === 'school' ? 'XP ของคุณช่วยโรงเรียนอยู่ 💪' : 'XP ของคุณยังไม่ถูกนับเข้า League (ตั้งค่าได้ในแท็บ ฉัน)'}</p>
+        <p class="small">Battle Pass tier <b>${tier}/${L.MAX_TIER}</b> · ${esc(schoolName())} ${mine ? `อันดับ <b>#${mine.rank}</b> สัปดาห์นี้` : ''}</p>
+        <p class="muted small">${P().visibility === 'school' ? 'XP ของคุณช่วยโรงเรียนอยู่ 💪' : 'XP ของคุณยังไม่ถูกนับเข้า League (ตั้งค่าได้ในแท็บ ฉัน)'}</p>
       </section>`;
   }
 
@@ -720,15 +729,16 @@
     ];
     const views = { pass: viewPass, league: viewLeague, tournament: viewTournament, cards: viewCards };
     return `
-      <div class="seg four">${seg.map(([v, n]) => `<button class="${state.seasonView === v ? 'on' : ''}" data-action="season-view" data-v="${v}">${n}</button>`).join('')}</div>
-      ${views[state.seasonView]()}`;
+      <div class="seg four">${seg.map(([v, n]) => `<button class="${ui.seasonView === v ? 'on' : ''}" data-action="season-view" data-v="${v}">${n}${v === 'cards' && snap.social.tradeOffers.length ? ' •' : ''}</button>`).join('')}</div>
+      ${views[ui.seasonView]()}`;
   }
 
   function viewPass() {
+    const p = P();
     const t = today();
-    const pass = passState();
+    const pass = p.pass;
     const season = L.seasonFor(t);
-    const sxp = L.xpBetween(state.checkins, season.startKey, t);
+    const sxp = L.xpBetween(p.checkins, season.startKey, t);
     const tier = L.tierFor(sxp);
     const cell = (track, i) => {
       const r = (track === 'free' ? D.PASS_FREE : D.PASS_PREMIUM)[i];
@@ -739,7 +749,7 @@
       if (claimed) action = '<span class="pill">รับแล้ว ✓</span>';
       else if (reached && !locked) action = `<button class="btn small primary" data-action="claim" data-v="${track}:${i}">รับ</button>`;
       else action = `<span class="pill muted-pill">${locked ? '🔒' : 'tier ' + (i + 1)}</span>`;
-      return `<div class="tier-cell${reached ? ' reached' : ''}${claimed ? ' claimed' : ''}"><span>${rewardLabel(r)}</span>${action}</div>`;
+      return `<div class="tier-cell${reached ? ' reached' : ''}${claimed ? ' claimed' : ''}"><span>${E.rewardLabel(r)}</span>${action}</div>`;
     };
     const claimable = D.PASS_FREE.some((_, i) => tier.tier > i && !pass.claimedFree.includes(i)) || (pass.premium && D.PASS_PREMIUM.some((_, i) => tier.tier > i && !pass.claimedPremium.includes(i)));
     return `
@@ -754,7 +764,7 @@
         pass.premium
           ? ''
           : `<section class="card premium-cta">
-              <h3>✨ Premium Pass ${state.priceVariant} บาท</h3>
+              <h3>✨ Premium Pass ${p.priceVariant} บาท</h3>
               <p class="small">ปลดล็อกแถว Premium: ธีมซากุระ ตุ๊กตาหมี ดอกไม้ทัดหู และแพ็กการ์ดเพิ่ม ใช้ได้ทั้งซีซั่น ${L.SEASON_DAYS} วัน</p>
               <button class="btn primary" data-action="buy-pass">ดู Premium</button>
             </section>`
@@ -767,44 +777,11 @@
       </section>`;
   }
 
-  function grant(r, seed) {
-    if (r.coins) state.coins += r.coins;
-    if (r.item && !state.owned.includes(r.item)) state.owned.push(r.item);
-    if (!r.pack) return [];
-    return L.openPack(D.PHOTOCARDS, seed, 3 * r.pack).map((id) => {
-      const isNew = !state.cards[id];
-      state.cards[id] = (state.cards[id] || 0) + 1;
-      return { id, isNew };
-    });
-  }
-
-  function claim(keys) {
-    const pass = passState();
-    let cards = [];
-    const labels = [];
-    keys.forEach(([track, i]) => {
-      const list = track === 'free' ? pass.claimedFree : pass.claimedPremium;
-      if (list.includes(i)) return;
-      list.push(i);
-      const r = (track === 'free' ? D.PASS_FREE : D.PASS_PREMIUM)[i];
-      labels.push(rewardLabel(r));
-      cards = cards.concat(grant(r, [state.profile.nickname, pass.season, track, i].join('|')));
-    });
-    save();
-    render();
-    if (cards.length) showPack(cards);
-    else if (labels.length) toast('ได้ ' + labels.join(', '));
-  }
-
-  function claimAll() {
-    const pass = passState();
-    const tier = L.tierFor(L.xpBetween(state.checkins, L.seasonFor(today()).startKey, today())).tier;
-    const keys = [];
-    for (let i = 0; i < tier; i++) {
-      keys.push(['free', i]);
-      if (pass.premium) keys.push(['premium', i]);
-    }
-    claim(keys);
+  async function claimRewards(action, args) {
+    const r = await run(action, args);
+    if (!r) return;
+    if (r.pulled.length) showPack(r.pulled);
+    else if (r.labels.length) toast('ได้ ' + r.labels.join(', '));
   }
 
   function showPack(pulled) {
@@ -812,9 +789,9 @@
       <h2>เปิดแพ็กการ์ด! 🃏</h2>
       <div class="cards pack">
         ${pulled
-          .map((p, i) => {
-            const c = byId(D.PHOTOCARDS, p.id);
-            return `<div class="pcard ${c.rarity}" style="animation-delay:${i * 0.12}s"><span class="pcard-emoji">${c.emoji}</span><b>${esc(c.name)}</b><small>${D.RARITY[c.rarity]} · ${p.isNew ? 'ใหม่!' : 'ซ้ำ'}</small></div>`;
+          .map((x, i) => {
+            const c = byId(D.PHOTOCARDS, x.id);
+            return `<div class="pcard ${c.rarity}" style="animation-delay:${i * 0.12}s"><span class="pcard-emoji">${c.emoji}</span><b>${esc(c.name)}</b><small>${D.RARITY[c.rarity]} · ${x.isNew ? 'ใหม่!' : 'ซ้ำ'}</small></div>`;
           })
           .join('')}
       </div>
@@ -823,45 +800,45 @@
   }
 
   function openBuyPass() {
-    state.fakeDoor.buyClicks++;
-    save();
+    const p = P();
+    run('fake-door', { key: 'buyClicks' });
     openModal(`
-      <h2>✨ Premium Pass ซีซั่น ${state.pass.season}</h2>
-      <p>${state.priceVariant} บาท จ่ายครั้งเดียวทั้งซีซั่น ไม่ใช่รายเดือน</p>
+      <h2>✨ Premium Pass ซีซั่น ${p.pass.season}</h2>
+      <p>${p.priceVariant} บาท จ่ายครั้งเดียวทั้งซีซั่น ไม่ใช่รายเดือน</p>
       <ul class="promise">
-        ${D.PASS_PREMIUM.filter((r) => r.item).map((r) => `<li>${rewardLabel(r)}</li>`).join('')}
+        ${D.PASS_PREMIUM.filter((r) => r.item).map((r) => `<li>${E.rewardLabel(r)}</li>`).join('')}
         <li>🃏 การ์ดเพิ่ม ${D.PASS_PREMIUM.reduce((n, r) => n + (r.pack || 0), 0)} แพ็ก</li>
       </ul>
       <p class="muted small">ไม่มี XP boost ไม่มีทางลัด — ทุกคนไต่ tier ด้วยความสม่ำเสมอเท่ากัน</p>
-      <button class="btn primary big" data-action="pass-self">ซื้อเอง ${state.priceVariant} บาท</button>
+      <button class="btn primary big" data-action="pass-self">ซื้อเอง ${p.priceVariant} บาท</button>
       <button class="btn big" data-action="pass-parent">👨‍👩‍👧 ขอให้ผู้ปกครองซื้อให้</button>
       <button class="btn big ghost-btn" data-action="close-modal">ไว้ก่อน</button>`);
   }
 
-  function unlockPremiumTrial(extra) {
-    state.pass.premium = true;
-    save();
-    render();
+  async function unlockPremiumTrial(extra) {
+    if (!(await run('unlock-premium'))) return;
     openModal(`
       <div class="hero">💛</div>
       <h2>ขอบคุณที่สนใจ!</h2>
-      <p>นี่คือ prototype ยังไม่มีการเก็บเงินจริง เราปลดล็อก Premium ให้ทดลองฟรีตลอดซีซั่นนี้</p>
+      <p>ตอนนี้ยังไม่มีการเก็บเงินจริง เราปลดล็อก Premium ให้ทดลองฟรีตลอดซีซั่นนี้</p>
       ${extra || ''}
       <button class="btn primary big" data-action="close-modal">ไปรับรางวัล</button>`);
   }
 
   function parentMessage() {
-    const total = Object.keys(state.checkins).length;
-    return `ช่วยซื้อ Premium Pass ของแอป ActiveLift School ให้หน่อยได้ไหม (${state.priceVariant} บาท ครั้งเดียวทั้งซีซั่น) เป็นของแต่งห้องล้วนๆ ไม่มีทางลัด ตอนนี้ออกกำลังกายมาแล้ว ${total} วัน 💪`;
+    const total = Object.keys(P().checkins).length;
+    return `ช่วยซื้อ Premium Pass ของแอป ActiveLift School ให้หน่อยได้ไหม (${P().priceVariant} บาท ครั้งเดียวทั้งซีซั่น) เป็นของแต่งห้องล้วนๆ ไม่มีทางลัด ตอนนี้ออกกำลังกายมาแล้ว ${total} วัน 💪`;
   }
 
   function viewLeague() {
-    const rows = leagueRows();
-    const mine = rows.find((r) => r.mine);
+    const p = P();
+    const rows = snap.league;
+    const mine = myLeagueRow();
     const top = rows.slice(0, 8);
     if (mine && mine.rank > 8) top.push(mine);
-    const max = rows[0].avg;
+    const max = Math.max(1, rows[0] ? rows[0].avg : 1);
     const resetIn = 7 - L.diffDays(L.weekKey(today()), today());
+    const weekXp = L.xpBetween(p.checkins, L.weekKey(today()), today());
     return `
       <section class="card">
         <div class="row between"><h3>🏫 School League</h3><span class="pill">รีเซ็ตใน ${resetIn} วัน</span></div>
@@ -871,18 +848,19 @@
             .map(
               (r) => `
             <div class="league-row${r.mine ? ' mine' : ''}">
-              <span class="rank">${r.rank <= 3 ? ['🥇', '🥈', '🥉'][r.rank - 1] : '#' + r.rank}</span>
-              <div class="grow"><b>${esc(r.name)}</b><div class="bar thin"><div style="width:${(r.avg / max) * 100}%"></div></div></div>
+              <span class="rank">${r.rank <= 3 && r.avg > 0 ? ['🥇', '🥈', '🥉'][r.rank - 1] : '#' + r.rank}</span>
+              <div class="grow"><b>${esc(r.name)}</b>${isRemote() ? `<small class="muted"> · ${r.members} คน</small>` : ''}<div class="bar thin"><div style="width:${(r.avg / max) * 100}%"></div></div></div>
               <span class="small">${r.avg}</span>
             </div>`
             )
             .join('')}
         </div>
+        ${!mine ? '<p class="muted small">สถาบันของคุณยังไม่อยู่ในลีก ชวนเพื่อนมาสมัครเยอะๆ แล้วเราจะเพิ่มให้</p>' : ''}
       </section>
       <section class="card">
         ${
-          state.visibility === 'school'
-            ? `<p>คุณช่วย ${esc(schoolName())} ไป <b>+${weekXp()} XP</b> สัปดาห์นี้ 💪</p><p class="muted small">ป้าย ${esc(schoolBadge())} แสดงอยู่ในมินิรูมของคุณ</p>`
+          p.visibility === 'school'
+            ? `<p>คุณช่วย ${esc(schoolName())} ไป <b>+${weekXp} XP</b> สัปดาห์นี้ 💪</p>${schoolBadge() ? `<p class="muted small">ป้าย ${esc(schoolBadge())} แสดงอยู่ในมินิรูมของคุณ</p>` : ''}`
             : `<p>XP ของคุณยังไม่ถูกนับเข้า League</p>
                <p class="muted small">ไม่เป็นไรเลย ค่อยเปิดตอนพร้อม XP และ streak ส่วนตัวยังสะสมตามปกติ</p>
                <button class="btn" data-action="join-league">นับ XP ของฉันให้โรงเรียน</button>`
@@ -891,17 +869,37 @@
   }
 
   function viewCards() {
+    const p = P();
     const ach = D.ACHIEVEMENTS;
     const pcs = D.PHOTOCARDS;
-    const ownedPc = pcs.filter((c) => state.cards[c.id]).length;
+    const ownedPc = pcs.filter((c) => p.cards[c.id]).length;
+    const dups = pcs.filter((c) => (p.cards[c.id] || 0) >= 2);
+    const offers = snap.social.tradeOffers;
     return `
+      ${
+        offers.length
+          ? `<section class="card inbox">
+              <h3>🔄 ข้อเสนอแลกการ์ด</h3>
+              ${offers
+                .map((o) => {
+                  const c = byId(D.PHOTOCARDS, o.card);
+                  return `<div class="offer">
+                    <p><b>${esc(o.name)}</b> อยากให้ ${c.emoji} ${esc(c.name)} แลกกับการ์ดซ้ำของคุณ 1 ใบ</p>
+                    <div class="chips">${dups.map((d) => `<button class="chip" data-action="trade-accept" data-offer="${o.id}" data-v="${d.id}">ให้ ${d.emoji} ${esc(d.name)}</button>`).join('') || '<span class="muted small">คุณยังไม่มีการ์ดซ้ำให้แลก</span>'}</div>
+                    <button class="btn small" data-action="trade-decline" data-offer="${o.id}">ไม่แลก</button>
+                  </div>`;
+                })
+                .join('')}
+            </section>`
+          : ''
+      }
       <section class="card">
-        <div class="row between"><h3>การ์ดความสำเร็จ</h3><span class="pill">${ach.filter((a) => state.cards[a.id]).length}/${ach.length}</span></div>
+        <div class="row between"><h3>การ์ดความสำเร็จ</h3><span class="pill">${ach.filter((a) => p.cards[a.id]).length}/${ach.length}</span></div>
         <p class="muted small">ได้จาก milestone ความสม่ำเสมอ ไม่ใช่จากรูปร่างหรือตัวเลขบนตาชั่ง</p>
         <div class="cards">
           ${ach
             .map((a) =>
-              state.cards[a.id]
+              p.cards[a.id]
                 ? `<div class="pcard ${a.rarity}"><span class="pcard-emoji">${a.emoji}</span><b>${esc(a.name)}</b><small>${esc(a.desc)}</small></div>`
                 : `<div class="pcard locked"><span class="pcard-emoji">🔒</span><b>???</b><small>${esc(a.desc)}</small></div>`
             )
@@ -910,11 +908,11 @@
       </section>
       <section class="card">
         <div class="row between"><h3>โฟโต้การ์ด</h3><span class="pill">${ownedPc}/${pcs.length}</span></div>
-        <p class="muted small">ได้จากแพ็กใน Battle Pass · ใบซ้ำแลกกับเพื่อนในแก๊งได้</p>
+        <p class="muted small">ได้จากแพ็กใน Battle Pass · ใบซ้ำแลกกับเพื่อนในแก๊งได้${snap.social.outgoingTrades ? ` · รอเพื่อนตอบ ${snap.social.outgoingTrades} ข้อเสนอ` : ''}</p>
         <div class="cards">
           ${pcs
             .map((c) => {
-              const n = state.cards[c.id] || 0;
+              const n = p.cards[c.id] || 0;
               if (!n) return `<div class="pcard locked"><span class="pcard-emoji">❔</span><b>???</b><small>${D.RARITY[c.rarity]}</small></div>`;
               return `<div class="pcard ${c.rarity}"><span class="pcard-emoji">${c.emoji}</span><b>${esc(c.name)}</b><small>${D.RARITY[c.rarity]}${n > 1 ? ' · x' + n : ''}</small>${n > 1 ? `<button class="btn small" data-action="trade" data-v="${c.id}">แลก</button>` : ''}</div>`;
             })
@@ -923,75 +921,33 @@
       </section>`;
   }
 
-  function tradePartners() {
-    const names = (state.group ? state.group.members : []).concat(state.buddy ? [state.buddy.name] : []);
-    return peopleFor(names).filter((p) => !state.blocked.includes(p.name));
-  }
-
-  // Each friend offers one photocard you are missing, fixed per day.
-  function tradeOffer(person, giveId) {
-    const missing = D.PHOTOCARDS.filter((c) => !state.cards[c.id] && c.id !== giveId);
-    if (!missing.length) return null;
-    return missing[Math.floor(L.seededRandom(person.name + '|' + giveId + '|' + today()) * missing.length)];
-  }
-
-  function openTrade(giveId) {
-    const give = byId(D.PHOTOCARDS, giveId);
-    const partners = tradePartners();
-    let body;
-    if (!partners.length) {
-      body = `<p class="muted">แลกได้เฉพาะกับเพื่อนในแก๊งหรือบัดดี้ ยังไม่มีเลย ลองสร้างกลุ่มก่อนนะ</p>
-        <button class="btn primary" data-action="tab" data-v="friends">ไปหน้าเพื่อน</button>`;
-    } else {
-      body = partners
-        .map((p) => {
-          const offer = tradeOffer(p, giveId);
-          return `<div class="member"><span class="mini-avatar">${p.avatar}</span>
-            <div class="grow"><b>${esc(p.name)}</b><br/><small class="muted">${offer ? 'ให้ ' + offer.emoji + ' ' + esc(offer.name) : 'ไม่มีใบที่คุณยังขาด'}</small></div>
-            ${offer ? `<button class="btn small primary" data-action="do-trade" data-v="${giveId}" data-to="${esc(p.name)}">แลก</button>` : ''}</div>`;
-        })
-        .join('');
-    }
+  function openTrade(cardId) {
+    const give = byId(D.PHOTOCARDS, cardId);
+    const partners = friends();
+    const body = partners.length
+      ? partners
+          .map(
+            (m) => `<div class="member"><span class="mini-avatar">${m.avatar}</span>
+            <div class="grow"><b>${esc(m.name)}</b><br/><small class="muted">${isRemote() ? 'เพื่อนเลือกการ์ดซ้ำของเขามาแลกกลับ' : 'แลกกับใบที่คุณยังขาด'}</small></div>
+            <button class="btn small primary" data-action="do-trade" data-v="${cardId}" data-to="${esc(m.id)}">เสนอแลก</button></div>`
+          )
+          .join('')
+      : `<p class="muted">แลกได้เฉพาะกับเพื่อนในแก๊งหรือบัดดี้ ยังไม่มีเลย ลองสร้างกลุ่มก่อนนะ</p>
+         <button class="btn primary" data-action="tab" data-v="friends">ไปหน้าเพื่อน</button>`;
     openModal(`<h2>แลก ${give.emoji} ${esc(give.name)}</h2><p class="muted small">แลกเฉพาะใบซ้ำ ใบสุดท้ายของคุณจะอยู่กับคุณเสมอ</p>${body}`);
   }
 
-  function doTrade(giveId, name) {
-    const person = D.PEOPLE.find((p) => p.name === name);
-    const offer = tradeOffer(person, giveId);
-    if (!offer || (state.cards[giveId] || 0) < 2) return closeModal();
-    state.cards[giveId]--;
-    state.cards[offer.id] = 1;
-    save();
-    closeModal();
-    render();
-    toast('แลกกับ' + name + 'แล้ว ได้ ' + offer.emoji + ' ' + offer.name);
-  }
-
-  // ---------- Phase 3: inter-school tournament ----------
-
-  function userTournamentDays(round) {
-    return Object.keys(state.checkins).filter((k) => k >= round.startKey && k <= round.endKey).length;
-  }
-
-  function tournamentBracket(t) {
-    const tour = L.tournamentFor(t);
-    const seeds = D.TOURNAMENT_SCHOOLS.slice().sort((a, b) => L.seededRandom(a + '|seed|' + tour.season) - L.seededRandom(b + '|seed|' + tour.season));
-    const counted = state.visibility === 'school';
-    const score = (id, round) => {
-      const user = id === state.profile.schoolId ? { counted, days: userTournamentDays(round) } : null;
-      return L.tournamentScore({ id }, round, t, user);
-    };
-    return { tour, rounds: L.bracket(seeds, tour.rounds, t, score) };
-  }
+  // ---------- inter-school tournament ----------
 
   function shortSchool(id) {
     return byId(D.SCHOOLS, id).name.replace(/^โรงเรียน|^มหาวิทยาลัย/, '').replace(/ \(.*\)$/, '');
   }
 
   function viewTournament() {
+    const p = P();
     const t = today();
-    const { tour, rounds } = tournamentBracket(t);
-    const partner = D.TOURNAMENT_SCHOOLS.includes(state.profile.schoolId);
+    const { tour, rounds } = snap.tournament;
+    const partner = D.TOURNAMENT_SCHOOLS.includes(p.profile.schoolId);
     const parts = [];
 
     parts.push(`
@@ -1008,21 +964,22 @@
           <p class="small">ทัวร์นาเมนต์จัดร่วมกับโรงเรียนที่เป็นพาร์ทเนอร์ ให้ครูพละหรือสโมสรนักเรียนสมัครให้ได้ ใช้ในวิชาพลศึกษาได้ด้วย</p>
           <button class="btn primary" data-action="invite-teacher">ชวนครูพละให้โรงเรียนเข้าร่วม</button>
         </section>`);
-    } else if (tour.phase === 'live') {
+    } else if (tour.phase === 'live' && rounds.length) {
       const live = rounds[rounds.length - 1];
       const round = tour.rounds[live.round];
-      const days = userTournamentDays(round);
-      const stillIn = live.matches.some((m) => m.a === state.profile.schoolId || m.b === state.profile.schoolId);
+      const days = Object.keys(p.checkins).filter((k) => k >= round.startKey && k <= round.endKey).length;
+      const stillIn = live.matches.some((m) => m.a === p.profile.schoolId || m.b === p.profile.schoolId);
+      const shown = Math.min(days, L.TOURNAMENT_MIN_DAYS);
       parts.push(`
         <section class="card">
           <h3>สัปดาห์นี้: ${D.ROUND_NAMES[live.round]}</h3>
           ${
             !stillIn
               ? '<p>โรงเรียนของคุณตกรอบแล้ว ซีซั่นหน้าเอาใหม่! 💪 ยังเชียร์โรงเรียนอื่นได้นะ</p>'
-              : state.visibility !== 'school'
+              : p.visibility !== 'school'
                 ? `<p class="small">การขยับของคุณจะนับให้โรงเรียนเมื่อเปิดการมองเห็นระดับโรงเรียน</p><button class="btn" data-action="join-league">นับให้โรงเรียนด้วย</button>`
-                : `<p>คุณขยับไปแล้ว <b>${Math.min(days, L.TOURNAMENT_MIN_DAYS)}/${L.TOURNAMENT_MIN_DAYS}</b> วัน ${days >= L.TOURNAMENT_MIN_DAYS ? '— นับเป็น 1 คนให้โรงเรียนแล้ว ✓' : ''}</p>
-                   <div class="bar"><div style="width:${(Math.min(days, L.TOURNAMENT_MIN_DAYS) / L.TOURNAMENT_MIN_DAYS) * 100}%"></div></div>`
+                : `<p>คุณขยับไปแล้ว <b>${shown}/${L.TOURNAMENT_MIN_DAYS}</b> วัน ${days >= L.TOURNAMENT_MIN_DAYS ? '— นับเป็น 1 คนให้โรงเรียนแล้ว ✓' : ''}</p>
+                   <div class="bar"><div style="width:${(shown / L.TOURNAMENT_MIN_DAYS) * 100}%"></div></div>`
           }
         </section>`);
     }
@@ -1033,16 +990,16 @@
           <div class="row between"><h3>${D.ROUND_NAMES[r.round]}</h3><span class="pill">${r.finished ? 'จบแล้ว' : 'กำลังแข่ง'}</span></div>
           ${r.matches
             .map((m) => {
-              const side = (id, sc) => `<div class="side${m.winner === id ? ' win' : ''}${id === state.profile.schoolId ? ' mine' : ''}"><span>${esc(shortSchool(id))}</span><b>${sc}%</b></div>`;
+              const side = (id, sc) => `<div class="side${m.winner === id ? ' win' : ''}${id === p.profile.schoolId ? ' mine' : ''}"><span>${esc(shortSchool(id))}</span><b>${sc}%</b></div>`;
               return `<div class="match">${side(m.a, m.sa)}${side(m.b, m.sb)}</div>`;
             })
             .join('')}
         </section>`);
     });
 
-    if (tour.phase === 'done') {
+    if (tour.phase === 'done' && rounds[2]) {
       const final = rounds[2].matches[0];
-      const mine = final.winner === state.profile.schoolId;
+      const mine = final.winner === p.profile.schoolId;
       parts.push(`
         <section class="card center ${mine ? 'done' : ''}">
           <div class="hero">🏆</div>
@@ -1053,42 +1010,38 @@
     return parts.join('');
   }
 
-  function teacherMessage() {
-    return `เรียนคุณครู นักเรียนอยากชวน ${schoolName()} เข้าร่วม “ศึกขยับข้ามโรงเรียน” ของแอป ActiveLift School ค่ะ/ครับ เป็นแอปออกกำลังกายที่ไม่วัดรูปร่างหรือน้ำหนัก วัดแค่ความสม่ำเสมอ ใช้ประกอบวิชาพลศึกษาได้ และโรงเรียนดูภาพรวมการขยับของนักเรียนได้`;
-  }
-
   function openTeacherInvite() {
-    state.fakeDoor.teacherInvites = (state.fakeDoor.teacherInvites || 0) + 1;
-    save();
-    const msg = teacherMessage();
+    run('fake-door', { key: 'teacherInvites' });
+    const msg = `เรียนคุณครู นักเรียนอยากชวน ${schoolName()} เข้าร่วม “ศึกขยับข้ามโรงเรียน” ของแอป ActiveLift School ค่ะ/ครับ เป็นแอปออกกำลังกายที่ไม่วัดรูปร่างหรือน้ำหนัก วัดแค่ความสม่ำเสมอ ใช้ประกอบวิชาพลศึกษาได้ และโรงเรียนดูภาพรวมการขยับของนักเรียนได้`;
     if (navigator.clipboard) navigator.clipboard.writeText(msg).catch(() => {});
     openModal(`
       <h2>ชวนครูพละ 🧑‍🏫</h2>
       <p class="muted small">ส่งข้อความนี้ให้ครูหรือสโมสรนักเรียน ทีมงานจะติดต่อกลับเพื่อจัดแข่งให้</p>
       <div class="note">${esc(msg)}</div>
-      <p class="muted small">ขอบคุณที่ช่วยชวน! (prototype: นับไว้เป็นความสนใจของโรงเรียน)</p>
+      <p class="muted small">ขอบคุณที่ช่วยชวน! (เรานับไว้เป็นความสนใจของโรงเรียน)</p>
       <button class="btn primary big" data-action="close-modal">เรียบร้อย</button>`);
   }
 
-  // ---------- Phase 3: local brand redemption ----------
+  // ---------- local brand redemption ----------
 
   function viewCoupons() {
+    const p = P();
     const t = today();
-    const coupons = state.coupons.slice().reverse();
-    const can = L.canRedeem(state.coupons, t);
+    const coupons = p.coupons.slice().reverse();
+    const can = L.canRedeem(p.coupons, t);
     const statusText = { active: 'ใช้ได้', used: 'ใช้แล้ว', expired: 'หมดอายุ' };
     return `
       <section class="card">
-        <div class="row between"><h3>🎁 คูปองร้านใกล้โรงเรียน</h3><span class="pill">🪙 ${state.coins}</span></div>
+        <div class="row between"><h3>🎁 คูปองร้านใกล้โรงเรียน</h3><span class="pill">🪙 ${p.coins}</span></div>
         <p class="muted small">แลกเหรียญจากการขยับเป็นส่วนลดจริง สัปดาห์ละ 1 ใบ ใช้ได้ ${L.COUPON_DAYS} วัน · ร้านค้าพาร์ทเนอร์เป็นผู้ออกส่วนลด ไม่มีร้านยาลดน้ำหนัก/อาหารเสริมลดน้ำหนัก</p>
         ${can ? '' : '<div class="note">สัปดาห์นี้แลกไปแล้ว 1 ใบ แลกใหม่ได้วันจันทร์หน้า 🌱</div>'}
         <div class="partners">
           ${D.PARTNERS.map(
-            (p) => `
+            (x) => `
             <div class="member">
-              <span class="mini-avatar">${p.emoji}</span>
-              <div class="grow"><b>${esc(p.offer)}</b><br/><small class="muted">${esc(p.name)}</small></div>
-              <button class="btn small" data-action="redeem" data-v="${p.id}"${!can || state.coins < p.cost ? ' disabled' : ''}>🪙 ${p.cost}</button>
+              <span class="mini-avatar">${x.emoji}</span>
+              <div class="grow"><b>${esc(x.offer)}</b><br/><small class="muted">${esc(x.name)}</small></div>
+              <button class="btn small" data-action="redeem" data-v="${x.id}"${!can || p.coins < x.cost ? ' disabled' : ''}>🪙 ${x.cost}</button>
             </div>`
           ).join('')}
         </div>
@@ -1098,11 +1051,11 @@
           ? `<section class="card"><h3>คูปองของฉัน</h3>
               ${coupons
                 .map((c) => {
-                  const p = byId(D.PARTNERS, c.partnerId);
+                  const x = byId(D.PARTNERS, c.partnerId);
                   const st = L.couponStatus(c, t);
                   return `<div class="member coupon ${st}" data-action="${st === 'active' ? 'show-coupon' : ''}" data-v="${c.code}">
-                    <span class="mini-avatar">${p.emoji}</span>
-                    <div class="grow"><b>${esc(p.offer)}</b><br/><small class="muted">${esc(p.name)} · ${st === 'active' ? 'หมดอายุ ' + L.addDays(c.issuedKey, L.COUPON_DAYS - 1) : statusText[st]}</small></div>
+                    <span class="mini-avatar">${x.emoji}</span>
+                    <div class="grow"><b>${esc(x.offer)}</b><br/><small class="muted">${esc(x.name)} · ${st === 'active' ? 'หมดอายุ ' + L.addDays(c.issuedKey, L.COUPON_DAYS - 1) : statusText[st]}</small></div>
                     <span class="pill">${statusText[st]}</span>
                   </div>`;
                 })
@@ -1112,17 +1065,11 @@
       }`;
   }
 
-  function redeem(partnerId) {
-    const p = byId(D.PARTNERS, partnerId);
-    const t = today();
-    if (!p || state.coins < p.cost || !L.canRedeem(state.coupons, t)) return;
-    if (!confirm('ใช้ ' + p.cost + ' เหรียญแลก “' + p.offer + '” ที่' + p.name + '?\nสัปดาห์นี้จะแลกได้แค่ใบนี้')) return;
-    state.coins -= p.cost;
-    const code = 'AL' + String(Math.floor(L.seededRandom(state.profile.nickname + t + partnerId) * 900000) + 100000);
-    state.coupons.push({ partnerId, code, issuedKey: t, usedKey: null });
-    save();
-    render();
-    showCoupon(code);
+  async function redeem(partnerId) {
+    const x = byId(D.PARTNERS, partnerId);
+    if (!x || !confirm('ใช้ ' + x.cost + ' เหรียญแลก “' + x.offer + '” ที่' + x.name + '?\nสัปดาห์นี้จะแลกได้แค่ใบนี้')) return;
+    const r = await run('redeem', { partnerId });
+    if (r) showCoupon(r.coupon.code);
   }
 
   // Pseudo-QR made from the code so each coupon looks distinct.
@@ -1137,13 +1084,14 @@
   }
 
   function showCoupon(code) {
-    const c = state.coupons.find((x) => x.code === code);
-    const p = byId(D.PARTNERS, c.partnerId);
+    const c = P().coupons.find((x) => x.code === code);
+    if (!c) return;
+    const x = byId(D.PARTNERS, c.partnerId);
     openModal(`
       <div class="coupon-ticket">
-        <div class="hero">${p.emoji}</div>
-        <h2>${esc(p.offer)}</h2>
-        <p class="muted">${esc(p.name)}</p>
+        <div class="hero">${x.emoji}</div>
+        <h2>${esc(x.offer)}</h2>
+        <p class="muted">${esc(x.name)}</p>
         ${qrHtml(c.code)}
         <p class="code big-code">${c.code}</p>
         <p class="muted small">ใช้ได้ถึง ${L.addDays(c.issuedKey, L.COUPON_DAYS - 1)} · ให้พนักงานสแกนหรือกดยืนยันที่หน้าร้าน</p>
@@ -1155,17 +1103,18 @@
   // ---------- me / settings ----------
 
   function viewMe() {
+    const p = P();
     const t = today();
-    const lv = L.levelFor(state.xp);
+    const lv = L.levelFor(p.xp);
     const s = streak();
-    const total = Object.keys(state.checkins).length;
+    const total = Object.keys(p.checkins).length;
     const days = Array.from({ length: 28 }, (_, i) => L.addDays(t, i - 27));
     return `
       <section class="card center">
-        <div class="hero">${state.profile.avatar}</div>
-        <h2>${esc(state.profile.nickname)}</h2>
-        <p class="muted">${esc(schoolName())}${state.profile.unit ? ' · ' + esc(state.profile.unit) : ''}</p>
-        <p>Lv.${lv.level} ${esc(lv.title)} · ${state.xp} XP</p>
+        <div class="hero">${p.profile.avatar}</div>
+        <h2>${esc(p.profile.nickname)}</h2>
+        <p class="muted">${esc(schoolName())}${p.profile.unit ? ' · ' + esc(p.profile.unit) : ''}</p>
+        <p>Lv.${lv.level} ${esc(lv.title)} · ${p.xp} XP</p>
       </section>
       <section class="card">
         <h3>พัฒนาการของฉัน 🌱</h3>
@@ -1173,10 +1122,10 @@
         <div class="stat-row">
           <div><b>${total}</b><small>วันที่ขยับ</small></div>
           <div><b>${s.count}</b><small>streak ตอนนี้</small></div>
-          <div><b>${state.cheersSent}</b><small>กำลังใจที่ส่ง</small></div>
+          <div><b>${p.cheersSent}</b><small>กำลังใจที่ส่ง</small></div>
         </div>
         <div class="heat">
-          ${days.map((k) => `<span class="${state.checkins[k] ? (state.checkins[k].kind === 'full' ? 'full' : 'part') : s.frozenDays.includes(k) ? 'frozen' : ''}" title="${k}"></span>`).join('')}
+          ${days.map((k) => `<span class="${p.checkins[k] ? (p.checkins[k].kind === 'full' ? 'full' : 'part') : s.frozenDays.includes(k) ? 'frozen' : ''}" title="${k}"></span>`).join('')}
         </div>
         <p class="muted small">28 วันล่าสุด · เข้ม = ครบตามตั้งใจ · อ่อน = ได้นิดหน่อย · ฟ้า = Streak Freeze</p>
       </section>
@@ -1189,256 +1138,270 @@
           ['class', '🏫 ' + unitLabel() + 'ของฉัน'],
           ['school', '🏆 ทั้งโรงเรียน (นับเข้า School League)'],
         ]
-          .map(([v, label]) => `<label class="radio"><input type="radio" name="vis" value="${v}" data-action="visibility"${state.visibility === v ? ' checked' : ''}/> ${label}</label>`)
+          .map(([v, label]) => `<label class="radio"><input type="radio" name="vis" value="${v}" data-action="visibility"${p.visibility === v ? ' checked' : ''}/> ${label}</label>`)
           .join('')}
       </section>
       <section class="card">
         <h3>เป้าหมายของฉัน</h3>
-        <div class="row between"><span>วันละ</span><select data-action="set-minutes">${[10, 15, 20, 30].map((m) => `<option${m === state.profile.minutes ? ' selected' : ''}>${m}</option>`).join('')}</select><span>นาที</span></div>
-        <div class="row between"><span>สัปดาห์ละ</span><select data-action="set-days">${[3, 4, 5, 6, 7].map((d) => `<option${d === state.profile.daysPerWeek ? ' selected' : ''}>${d}</option>`).join('')}</select><span>วัน</span></div>
+        <div class="row between"><span>วันละ</span><select data-action="set-minutes">${[10, 15, 20, 30].map((m) => `<option${m === p.profile.minutes ? ' selected' : ''}>${m}</option>`).join('')}</select><span>นาที</span></div>
+        <div class="row between"><span>สัปดาห์ละ</span><select data-action="set-days">${[3, 4, 5, 6, 7].map((d) => `<option${d === p.profile.daysPerWeek ? ' selected' : ''}>${d}</option>`).join('')}</select><span>วัน</span></div>
       </section>
-      <section class="card dev">
-        <h3>🧪 เครื่องมือทดสอบ prototype</h3>
-        <p class="muted small">วันที่ในแอป: ${t}${state.dayOffset ? ` (ข้ามมา ${state.dayOffset} วัน)` : ''}</p>
-        <div class="row wrap">
-          <button class="btn small" data-action="next-day">⏭️ ข้ามไปวันถัดไป</button>
-          <button class="btn small" data-action="export">⬇️ ส่งออกข้อมูลทดสอบ</button>
-          <button class="btn small danger" data-action="reset">เริ่มใหม่ทั้งหมด</button>
-        </div>
-      </section>`;
+      ${
+        isRemote()
+          ? `<section class="card">
+              <h3>บัญชีของฉัน</h3>
+              <p class="muted small">เข้าสู่ระบบเป็น <b>@${esc(snap.username)}</b> · เราไม่เก็บอีเมล เบอร์โทร หรือชื่อจริง</p>
+              <div class="row wrap">
+                <button class="btn small" data-action="export">⬇️ ดาวน์โหลดข้อมูลของฉัน</button>
+                <button class="btn small" data-action="logout">ออกจากระบบ</button>
+                <button class="btn small danger" data-action="delete-account">ลบบัญชี</button>
+              </div>
+            </section>`
+          : ''
+      }
+      ${
+        snap.devTools
+          ? `<section class="card dev">
+              <h3>🧪 เครื่องมือทดสอบ ${isRemote() ? '(เซิร์ฟเวอร์ทดสอบ)' : 'prototype (ออฟไลน์ เพื่อนจำลอง)'}</h3>
+              <p class="muted small">วันที่ในแอป: ${t}${p.dayOffset ? ` (ข้ามมา ${p.dayOffset} วัน)` : ''}</p>
+              <div class="row wrap">
+                <button class="btn small" data-action="next-day">⏭️ ข้ามไปวันถัดไป</button>
+                ${isRemote() ? '' : '<button class="btn small" data-action="export">⬇️ ส่งออกข้อมูลทดสอบ</button><button class="btn small danger" data-action="reset">เริ่มใหม่ทั้งหมด</button>'}
+              </div>
+            </section>`
+          : ''
+      }`;
   }
 
-  function exportData() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'activelift-test-' + today() + '.json';
-    a.click();
-    URL.revokeObjectURL(a.href);
+  async function exportData() {
+    try {
+      const data = await backend.exportData();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'activelift-' + (isRemote() ? 'my-data-' : 'test-') + today() + '.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      toast(e.message);
+    }
   }
 
   // ---------- events ----------
 
-  function makeCode() {
-    return 'AL-' + String(Math.floor(1000 + Math.random() * 9000));
-  }
-
   const actions = {
+    'auth-mode'(v) {
+      authMode = v;
+      renderAuth();
+    },
     'ob-next'() {
       readOnboardInputs();
       const err = validateStep();
       if (err) return toast(err);
-      state.onboardStep = Math.min(ONBOARD_STEPS - 1, state.onboardStep + 1);
+      ui.onboardStep = Math.min(ONBOARD_STEPS - 1, ui.onboardStep + 1);
+      saveUi();
+      render();
     },
     'ob-back'() {
       readOnboardInputs();
-      state.onboardStep = Math.max(0, state.onboardStep - 1);
+      ui.onboardStep = Math.max(0, ui.onboardStep - 1);
+      saveUi();
+      render();
     },
     'ob-avatar'(v) {
       readOnboardInputs();
-      state.profile.avatar = v;
+      ui.draft.avatar = v;
+      saveUi();
+      render();
     },
     'ob-interest'(v) {
-      const list = state.profile.interests;
-      state.profile.interests = list.includes(v) ? list.filter((x) => x !== v) : list.concat(v);
+      const list = ui.draft.interests;
+      ui.draft.interests = list.includes(v) ? list.filter((x) => x !== v) : list.concat(v);
+      saveUi();
+      render();
     },
     'ob-level'(v) {
-      state.profile.level = v;
+      ui.draft.level = v;
+      render();
     },
     'ob-time'(v) {
-      state.profile.freeTime = v;
+      ui.draft.freeTime = v;
+      render();
     },
     'ob-minutes'(v) {
-      state.profile.minutes = Number(v);
+      ui.draft.minutes = Number(v);
+      render();
     },
     'ob-days'(v) {
-      state.profile.daysPerWeek = Number(v);
+      ui.draft.daysPerWeek = Number(v);
+      render();
     },
-    'ob-finish'() {
-      const t = today();
-      state.onboarded = true;
-      state.startKey = t;
-      state.invisibleUntil = L.addDays(t, L.INVISIBLE_DAYS);
-      toast('ยินดีต้อนรับ ' + state.profile.nickname + '! 🎉');
+    async 'ob-finish'() {
+      if (await run('onboard', { profile: ui.draft })) {
+        ui.onboardStep = 0;
+        ui.tab = 'home';
+        saveUi();
+        toast('ยินดีต้อนรับ ' + P().profile.nickname + '! 🎉');
+      }
     },
     tab(v) {
-      if (v === 'season' && state.tab !== 'season') state.fakeDoor.views++;
+      if (v === 'season' && ui.tab !== 'season') run('fake-door', { key: 'views' });
       closeModal();
-      state.tab = v;
+      ui.tab = v;
+      saveUi();
+      render();
       window.scrollTo(0, 0);
     },
-    'open-checkin'() {
-      openCheckin();
-      return 'keep';
-    },
-    'ci-act'(v, el) {
-      pickChip(el);
-      return 'keep';
-    },
-    'ci-kind'(v, el) {
-      pickChip(el);
-      return 'keep';
-    },
-    'ci-mood'(v, el) {
-      pickChip(el, true);
-      return 'keep';
-    },
-    'ci-submit'() {
-      submitCheckin();
-      return 'keep';
-    },
-    'close-modal'() {
-      closeModal();
-      return 'keep';
-    },
-    survey(v) {
-      const last = state.surveys[state.surveys.length - 1];
-      if (last) last.reason = v || null;
-      closeModal();
-      if (v) toast('ขอบคุณที่บอกเรานะ เริ่มใหม่วันไหนก็ได้ 💛');
-    },
-    'reveal-friends'() {
-      state.visibility = 'friends';
-      toast('ตอนนี้กลุ่มเพื่อนสนิทเห็นคุณแล้ว 🌷');
-    },
-    'reveal-later'() {
-      state.revealPromptDismissed = true;
-    },
-    buy(v) {
-      buy(v);
-      return 'keep';
-    },
-    'toggle-item'(v) {
-      toggleItem(v);
-      return 'keep';
-    },
-    'create-group'() {
-      const name = document.getElementById('group-name').value.trim() || 'แก๊งขยับของ' + state.profile.nickname;
-      const members = D.PEOPLE.filter((p) => !state.blocked.includes(p.name) && (!state.buddy || state.buddy.name !== p.name)).slice(0, 3).map((p) => p.name);
-      state.group = { name, code: makeCode(), createdKey: today(), members };
-      toast('สร้างกลุ่มแล้ว! เพื่อน ' + members.length + ' คนเข้าร่วมจากรหัสชวน');
-    },
-    'join-group'() {
-      const code = document.getElementById('group-code').value.trim().toUpperCase();
-      if (!code) return toast('ใส่รหัสกลุ่มก่อนนะ');
-      const members = D.PEOPLE.filter((p) => !state.blocked.includes(p.name) && (!state.buddy || state.buddy.name !== p.name)).slice(3, 7).map((p) => p.name);
-      state.group = { name: 'ก๊วนแบดหลังเลิกเรียน', code, createdKey: today(), members };
-      toast('เข้าร่วมกลุ่มแล้ว 🏸');
-    },
-    'leave-group'() {
-      if (!confirm('ออกจากกลุ่มนี้ใช่ไหม? streak ส่วนตัวของคุณจะยังอยู่ครบ')) return 'keep';
-      state.group = null;
-    },
-    cheer(v) {
-      openCheer(v);
-      return 'keep';
-    },
-    'cheer-msg'(v, el) {
-      state.cheersSent++;
-      closeModal();
-      toast('ส่ง “' + v + '” ให้' + el.dataset.to + 'แล้ว');
-    },
-    visit(v) {
-      visitRoom(v);
-      return 'keep';
-    },
-    'find-buddy'() {
-      findBuddy();
-      return 'keep';
-    },
-    'pick-buddy'(v) {
-      state.buddy = { name: v, status: 'trial', startKey: today() };
-      closeModal();
-      toast('เริ่มช่วงลองคุยกับ' + v + 'แล้ว 🫶');
-    },
-    'buddy-link'() {
-      state.buddy.status = 'linked';
-      toast('เป็นบัดดี้กันแล้ว 💞');
-    },
-    'buddy-end'() {
-      state.buddy = null;
-      toast('ไม่เป็นไรเลย หาบัดดี้ใหม่ได้ตลอดนะ');
-    },
-    'buddy-report'() {
-      if (!confirm('รายงานและบล็อก ' + state.buddy.name + '? อีกฝ่ายจะไม่เห็นคุณอีก')) return 'keep';
-      state.blocked.push(state.buddy.name);
-      if (state.group) state.group.members = state.group.members.filter((n) => n !== state.buddy.name);
-      state.buddy = null;
-      toast('เราได้รับรายงานแล้ว ขอบคุณที่บอกเรา 🙏');
-    },
     'season-view'(v) {
-      state.seasonView = v;
+      ui.seasonView = v;
+      saveUi();
+      render();
+    },
+    'room-view'(v) {
+      ui.roomView = v;
+      saveUi();
+      render();
+    },
+    'open-checkin': openCheckin,
+    'ci-act': (v, el) => pickChip(el),
+    'ci-kind': (v, el) => pickChip(el),
+    'ci-mood': (v, el) => pickChip(el, true),
+    'ci-submit': submitCheckin,
+    'close-modal': closeModal,
+    async survey(v) {
+      closeModal();
+      if ((await run('survey', { reason: v })) && v) toast('ขอบคุณที่บอกเรานะ เริ่มใหม่วันไหนก็ได้ 💛');
+    },
+    async 'reveal-friends'() {
+      if (await run('visibility', { value: 'friends' })) toast('ตอนนี้กลุ่มเพื่อนสนิทเห็นคุณแล้ว 🌷');
+    },
+    'reveal-later': () => run('reveal-later'),
+    async buy(v) {
+      if (await run('buy', { id: v })) {
+        const item = E.findItem(v);
+        toast('ได้ ' + item.emoji + ' ' + item.name + ' แล้ว!');
+      }
+    },
+    'toggle-item': (v) => run('toggle-item', { id: v }),
+    async 'create-group'() {
+      const r = await run('create-group', { name: document.getElementById('group-name').value });
+      if (r) toast(r.simulated ? 'สร้างกลุ่มแล้ว! เพื่อนจำลอง ' + r.simulated + ' คนเข้าร่วม' : 'สร้างกลุ่มแล้ว! ส่งรหัส ' + r.code + ' ให้เพื่อนเลย');
+    },
+    async 'join-group'() {
+      const r = await run('join-group', { code: document.getElementById('group-code').value });
+      if (r) toast('เข้าร่วม ' + r.name + ' แล้ว 🏸');
+    },
+    async 'leave-group'() {
+      if (confirm('ออกจากกลุ่มนี้ใช่ไหม? streak ส่วนตัวของคุณจะยังอยู่ครบ')) await run('leave-group');
+    },
+    cheer: openCheer,
+    async 'cheer-msg'(v, el) {
+      closeModal();
+      const r = await run('cheer', { to: friendId(el.dataset.to), message: v });
+      if (r) toast('ส่ง “' + v + '” ให้' + r.name + 'แล้ว');
+    },
+    'cheers-read': () => run('cheers-read'),
+    visit: visitRoom,
+    'find-buddy': findBuddy,
+    async 'pick-buddy'(v) {
+      closeModal();
+      const r = await run('buddy-request', { to: friendId(v) });
+      if (r) toast(r.accepted ? 'เริ่มช่วงลองคุยกับ' + r.name + 'แล้ว 🫶' : 'ส่งคำขอให้' + r.name + 'แล้ว รอตอบรับนะ 🫶');
+    },
+    async 'buddy-respond'(v) {
+      const r = await run('buddy-respond', { accept: v === 'yes' });
+      if (r) toast(r.accepted ? 'เริ่มช่วงลองคุยกันแล้ว 🫶' : 'ไม่เป็นไรเลย ขอบคุณที่ตอบนะ');
+    },
+    'buddy-stop-looking': () => run('buddy-stop-looking'),
+    async 'buddy-link'() {
+      const r = await run('buddy-link');
+      if (r) toast(r.linked ? 'เป็นบัดดี้กันแล้ว 💞' : 'ยืนยันแล้ว รออีกฝ่ายยืนยันนะ');
+    },
+    async 'buddy-end'() {
+      if (await run('buddy-end')) toast('ไม่เป็นไรเลย หาบัดดี้ใหม่ได้ตลอดนะ');
+    },
+    async 'buddy-report'() {
+      const b = snap.social.buddy;
+      if (!b || !confirm('รายงานและบล็อก ' + b.name + '? อีกฝ่ายจะไม่เห็นคุณอีก')) return;
+      if (await run('buddy-report')) toast('เราได้รับรายงานแล้ว ขอบคุณที่บอกเรา 🙏');
     },
     claim(v) {
       const [track, i] = v.split(':');
-      claim([[track, Number(i)]]);
-      return 'keep';
+      claimRewards('claim', { keys: [[track, Number(i)]] });
     },
-    'claim-all'() {
-      claimAll();
-      return 'keep';
-    },
-    'buy-pass'() {
-      openBuyPass();
-      return 'keep';
-    },
-    'pass-self'() {
-      unlockPremiumTrial();
-      return 'keep';
-    },
-    'pass-parent'() {
-      state.fakeDoor.parentClicks++;
+    'claim-all': () => claimRewards('claim-all'),
+    'buy-pass': openBuyPass,
+    'pass-self': () => unlockPremiumTrial(),
+    async 'pass-parent'() {
+      await run('fake-door', { key: 'parentClicks' });
       const msg = parentMessage();
       // The message is also shown in the modal in case the clipboard is unavailable.
       if (navigator.clipboard) navigator.clipboard.writeText(msg).catch(() => {});
       unlockPremiumTrial(`<p class="label">ข้อความส่งให้ผู้ปกครอง</p><div class="note">${esc(msg)}</div>`);
-      return 'keep';
     },
-    'join-league'() {
-      if (!confirmSchoolVisibility()) return 'keep';
-      state.visibility = 'school';
-      toast('XP ของคุณช่วยโรงเรียนแล้ว 🏫');
+    async 'join-league'() {
+      if (confirmSchoolVisibility() && (await run('visibility', { value: 'school' }))) toast('XP ของคุณช่วยโรงเรียนแล้ว 🏫');
     },
-    trade(v) {
-      openTrade(v);
-      return 'keep';
-    },
-    'do-trade'(v, el) {
-      doTrade(v, el.dataset.to);
-      return 'keep';
-    },
-    'room-view'(v) {
-      state.roomView = v;
-    },
-    'invite-teacher'() {
-      openTeacherInvite();
-      return 'keep';
-    },
-    redeem(v) {
-      redeem(v);
-      return 'keep';
-    },
-    'show-coupon'(v) {
-      showCoupon(v);
-      return 'keep';
-    },
-    'use-coupon'(v) {
-      if (!confirm('ยืนยันว่าพนักงานรับคูปองนี้แล้ว? ใช้ซ้ำไม่ได้')) return 'keep';
-      state.coupons.find((c) => c.code === v).usedKey = today();
+    trade: openTrade,
+    async 'do-trade'(v, el) {
       closeModal();
-      toast('ใช้คูปองแล้ว ขอให้อร่อย/สนุกนะ 💛');
+      const r = await run('trade-offer', { to: friendId(el.dataset.to), card: v });
+      if (!r) return;
+      if (r.got) {
+        const c = byId(D.PHOTOCARDS, r.got);
+        toast('แลกกับ' + r.name + 'แล้ว ได้ ' + c.emoji + ' ' + c.name);
+      } else toast('ส่งข้อเสนอให้' + r.name + 'แล้ว รอเพื่อนตอบนะ');
     },
-    'next-day'() {
-      state.dayOffset++;
-      toast('ข้ามไป ' + today());
+    async 'trade-accept'(v, el) {
+      const r = await run('trade-respond', { offerId: Number(el.dataset.offer), card: v });
+      if (r) {
+        const c = byId(D.PHOTOCARDS, r.got);
+        toast('แลกกับ' + r.name + 'แล้ว ได้ ' + c.emoji + ' ' + c.name);
+      }
     },
-    export() {
-      exportData();
-      return 'keep';
+    'trade-decline': (v, el) => run('trade-respond', { offerId: Number(el.dataset.offer), card: null }),
+    'invite-teacher': openTeacherInvite,
+    redeem,
+    'show-coupon': showCoupon,
+    async 'use-coupon'(v) {
+      if (!confirm('ยืนยันว่าพนักงานรับคูปองนี้แล้ว? ใช้ซ้ำไม่ได้')) return;
+      closeModal();
+      if (await run('use-coupon', { code: v })) toast('ใช้คูปองแล้ว ขอให้อร่อย/สนุกนะ 💛');
     },
-    reset() {
-      if (!confirm('ลบข้อมูลทั้งหมดและเริ่มใหม่?')) return 'keep';
-      state = freshState();
+    async 'next-day'() {
+      if (await run('next-day')) toast('ข้ามไป ' + today());
+    },
+    export: exportData,
+    reload: () => location.reload(),
+    async reset() {
+      if (!confirm('ลบข้อมูลทั้งหมดและเริ่มใหม่?')) return;
+      const r = await backend.reset();
+      Object.assign(ui, freshUi());
+      saveUi();
+      setSnapshot(r.snapshot);
+    },
+    async logout() {
+      await backend.logout();
+      Object.assign(ui, freshUi());
+      saveUi();
+      snap = null;
+      authMode = 'login';
+      render();
+    },
+    async 'delete-account'() {
+      const pw = prompt('ลบบัญชีและข้อมูลทั้งหมดถาวร ย้อนกลับไม่ได้\nใส่รหัสผ่านเพื่อยืนยัน');
+      if (!pw) return;
+      try {
+        await backend.deleteAccount(pw);
+        Object.assign(ui, freshUi());
+        saveUi();
+        snap = null;
+        authMode = 'register';
+        render();
+        toast('ลบบัญชีเรียบร้อยแล้ว');
+      } catch (e) {
+        toast(e.message);
+      }
     },
   };
 
@@ -1448,35 +1411,49 @@
     const fn = actions[el.dataset.action];
     if (!fn) return;
     e.preventDefault();
-    if (fn(el.dataset.v, el) !== 'keep') {
-      save();
-      render();
-    }
+    fn(el.dataset.v, el);
   });
 
-  document.addEventListener('change', (e) => {
+  document.addEventListener('submit', (e) => {
+    if (e.target.id !== 'auth-form') return;
+    e.preventDefault();
+    submitAuth();
+  });
+
+  document.addEventListener('change', async (e) => {
     const el = e.target;
     if (el.id === 'ob-school') {
       readOnboardInputs();
+      saveUi();
       render();
       return;
     }
     const a = el.dataset.action;
+    let ok = null;
     if (a === 'visibility') {
-      if (el.value === 'school' && state.visibility !== 'school' && !confirmSchoolVisibility()) return render();
-      state.visibility = el.value;
-    }
-    else if (a === 'set-minutes') state.profile.minutes = Number(el.value);
-    else if (a === 'set-days') state.profile.daysPerWeek = Number(el.value);
+      if (el.value === 'school' && P().visibility !== 'school' && !confirmSchoolVisibility()) return render();
+      ok = await run('visibility', { value: el.value });
+    } else if (a === 'set-minutes') ok = await run('goal', { minutes: Number(el.value) });
+    else if (a === 'set-days') ok = await run('goal', { daysPerWeek: Number(el.value) });
     else return;
-    save();
-    render();
-    toast('บันทึกแล้ว');
+    if (ok) toast('บันทึกแล้ว');
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !modalRoot.hidden) closeModal();
   });
 
-  render();
+  async function boot() {
+    app.innerHTML = '<main class="onboard"><div class="hero">🏸</div><p class="center muted">กำลังโหลด…</p></main>';
+    backend = (await window.RemoteBackend.available()) ? new window.RemoteBackend() : new window.LocalBackend();
+    try {
+      const r = await backend.init();
+      if (r.needsAuth) render();
+      else setSnapshot(r.snapshot);
+    } catch (e) {
+      app.innerHTML = `<main class="onboard"><div class="hero">😵</div><p class="center">${esc(e.message)}</p><button class="btn primary big" data-action="reload">ลองใหม่</button></main>`;
+    }
+  }
+
+  boot();
 })();

@@ -3,13 +3,16 @@
 แอปออกกำลังกายแนวคอมมิวนิตี้ + เกม สำหรับนักเรียน–นักศึกษาไทย
 **School League · Anti-toxic Gamification · Battle Pass ราคาไทย · Community แบบเกาหลีๆ**
 
-นี่คือ clickable prototype ของ Core Loop ตามแผนธุรกิจ (ส่วนที่ 4 และ 9 “Prototype”) สำหรับให้นักเรียน 10–15 คนลองกดก่อนลงทุนสร้างแอปจริง ไม่มี backend ข้อมูลทั้งหมดเก็บในเบราว์เซอร์ (localStorage)
+เริ่มจาก clickable prototype ของ Core Loop ตามแผนธุรกิจ (ส่วนที่ 4 และ 9 “Prototype”) และตอนนี้มีเซิร์ฟเวอร์จริงสำหรับผู้ใช้หลายคนแล้ว (Node.js + SQLite ไม่มี dependency ภายนอก)
 
 ## วิธีเปิด
 
-- เปิดไฟล์ `index.html` ในเบราว์เซอร์ได้เลย (ไม่ต้อง build)
-- หรือรันเซิร์ฟเวอร์ในเครื่อง: `npm start` แล้วเปิด <http://localhost:8080> (เปิดจากมือถือในวง Wi-Fi เดียวกันได้)
-- รันเทสต์ logic: `npm test` (Node 18+)
+มี 2 โหมด ใช้โค้ดหน้าแอปชุดเดียวกัน:
+
+- **ออนไลน์ (ผู้ใช้จริง):** `npm run server` แล้วเปิด <http://localhost:8080> → สมัครด้วยชื่อผู้ใช้ + รหัสผ่าน ข้อมูลกลุ่ม บัดดี้ กำลังใจ League และทัวร์นาเมนต์ใช้ร่วมกันข้ามเครื่องจริง (`npm run dev` = เปิดปุ่มข้ามวันสำหรับทดสอบ) รายละเอียดใน [`docs/backend.md`](docs/backend.md)
+- **ออฟไลน์ (prototype):** เปิดไฟล์ `index.html` ตรงๆ หรือ host แบบ static (เช่น GitHub Pages) — ทุกอย่างอยู่ในเบราว์เซอร์ เพื่อนเป็นผู้ใช้จำลอง เหมาะกับการทดสอบคนเดียว
+
+รันเทสต์ทั้งหมด: `npm test` (ต้องใช้ Node 22.13 ขึ้นไป)
 
 ออกแบบเป็น mobile-first (กว้างสุด 440px) ลองเปิดบนมือถือจะเหมือนแอปที่สุด
 
@@ -50,12 +53,16 @@
 ```
 index.html        หน้าเดียวของแอป
 css/style.css     ธีม soft/pastel แบบเกาหลี
-js/logic.js       logic ล้วน: วันที่, streak + freeze, XP/เลเวล, group streak, buddy score, ซีซั่น/tier, League, การ์ด, ทัวร์นาเมนต์, คูปอง (มีเทสต์)
+js/logic.js       กฎล้วน: วันที่, streak + freeze, XP/เลเวล, group streak, ซีซั่น/tier, League, ทัวร์นาเมนต์, คูปอง
 js/data.js        ข้อมูลสถาบัน กิจกรรม ไอเท็ม รางวัล Battle Pass การ์ด ร้านพาร์ทเนอร์ และผู้ใช้จำลอง
-js/app.js         UI และการจัดการ state
-tests/            เทสต์ด้วย node:test
+js/engine.js      action ของผู้เล่น + validation (ใช้ทั้งเบราว์เซอร์และเซิร์ฟเวอร์)
+js/local.js       backend ออฟไลน์ (เพื่อนจำลอง)
+js/remote.js      backend ออนไลน์ (เรียก API)
+js/app.js         UI
+server/           เซิร์ฟเวอร์: HTTP + API, SQLite, บัญชีผู้ใช้
 landing/          หน้าลงชื่อรอเปิดตัว + A/B test (index.html, landing.css, landing.js)
-docs/             สรุปแผนธุรกิจ แผนทดสอบ และวิธีตั้งค่า landing page
+tests/            เทสต์ด้วย node:test (logic, engine, server integration)
+docs/             แผนธุรกิจ, landing page, backend
 ```
 
 ## ขั้นต่อไป

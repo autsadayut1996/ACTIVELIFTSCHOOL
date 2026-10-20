@@ -90,3 +90,14 @@ test('buddy score uses level, free time and interests only', () => {
   assert.equal(r.score, 5);
   assert.deepEqual(r.shared, ['dance']);
 });
+
+test('group streak from real check-in sets', () => {
+  const a = days(MON, [0, 1, 2]);
+  const b = new Set([L.addDays(MON, 1), L.addDays(MON, 2)]);
+  const c = {};
+  // 3 people, need 2: day 0 only "a" -> breaks; days 1-2 counted.
+  const g = L.groupStreakFrom([a, b, c], MON, L.addDays(MON, 2));
+  assert.equal(g.count, 2);
+  assert.equal(g.need, 2);
+  assert.equal(g.doneToday, 2);
+});

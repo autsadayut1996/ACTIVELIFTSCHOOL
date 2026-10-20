@@ -305,6 +305,19 @@ hr { border: 0; border-top: 1px dashed var(--line); margin: 16px 0; }
 .qr span.on { background: var(--ink); border-radius: 2px; }
 .big-code { display: inline-block; font-size: 1.2rem; }
 
+/* online mode */
+.tab { position: relative; }
+.dot-badge {
+  position: absolute; top: 0; right: calc(50% - 22px);
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-style: normal; font-size: 0.7rem; line-height: 18px;
+}
+.card.inbox { border: 1.5px solid var(--pink); }
+.offer { border-top: 1px dashed var(--line); padding: 8px 0; }
+.offer:first-of-type { border-top: 0; }
+.center { text-align: center; }
+body.busy { cursor: progress; }
+
 /* modal & toast */
 #modal { position: fixed; inset: 0; z-index: 20; }
 .backdrop { position: absolute; inset: 0; background: rgba(59, 51, 82, 0.35); }

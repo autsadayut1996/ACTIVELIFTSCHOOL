@@ -5,6 +5,11 @@
   "description": "ActiveLift School — MVP clickable prototype (community + gamified fitness for Thai students)",
   "scripts": {
     "start": "python3 -m http.server 8080",
-    "test": "node --test"
+    "server": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "DEV_TIME_TRAVEL=1 node --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

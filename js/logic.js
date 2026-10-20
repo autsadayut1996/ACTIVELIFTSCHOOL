@@ -145,11 +145,13 @@
   }
 
   // A group day counts when at least half the members checked in.
-  function groupStreak(userCheckins, members, createdKey, today) {
-    const total = members.length + 1;
+  // `sets` holds one check-in map (or Set-like `has`) per member, including the viewer.
+  function groupStreakFrom(sets, createdKey, today) {
+    const total = sets.length;
     const need = Math.ceil(total / 2);
-    const dayCounts = (k) =>
-      (userCheckins[k] ? 1 : 0) + members.filter((m) => mockChecked(m, k)).length >= need;
+    const has = (set, k) => (typeof set.has === 'function' ? set.has(k) : Boolean(set[k]));
+    const doneOn = (k) => sets.filter((set) => has(set, k)).length;
+    const dayCounts = (k) => doneOn(k) >= need;
 
     const countsToday = dayCounts(today);
     let day = countsToday ? today : addDays(today, -1);
@@ -158,7 +160,12 @@
       count++;
       day = addDays(day, -1);
     }
-    return { count, countsToday, need, total };
+    return { count, countsToday, need, total, doneToday: doneOn(today) };
+  }
+
+  function groupStreak(userCheckins, members, createdKey, today) {
+    const memberSets = members.map((m) => ({ has: (k) => mockChecked(m, k) }));
+    return groupStreakFrom([userCheckins].concat(memberSets), createdKey, today);
   }
 
   // Match on activity level, free time and interests — never on appearance.
@@ -343,6 +350,7 @@
     mockChecked,
     mockStreak,
     groupStreak,
+    groupStreakFrom,
     buddyScore,
   };
 
