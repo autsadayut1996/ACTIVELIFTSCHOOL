@@ -10,7 +10,7 @@ npm run dev      # เหมือนกัน แต่เปิดปุ่ม
 npm test         # unit + integration tests ทั้งหมด
 ```
 
-ตัวแปรแวดล้อม: `PORT` (8080), `HOST` (0.0.0.0), `DB_PATH` (`server/data/activelift.db`), `DEV_TIME_TRAVEL=1` (เปิดการข้ามวัน — ห้ามเปิดบนเซิร์ฟเวอร์จริง)
+ตัวแปรแวดล้อม: `PORT` (8080), `HOST` (0.0.0.0), `DB_PATH` (`server/data/activelift.db`), `DEV_TIME_TRAVEL=1` (เปิดการข้ามวัน — ห้ามเปิดบนเซิร์ฟเวอร์จริง), `REGISTRATION_CODE`, `ADMIN_TOKEN`, `TRUST_PROXY`, `BACKUP_DIR`, `BACKUP_HOURS` — ดูความหมายและวิธี deploy ใน [`deploy.md`](deploy.md)
 
 เซิร์ฟเวอร์เสิร์ฟทั้งแอป (`/`), landing page (`/landing/`) และ API (`/api/*`) จาก origin เดียวกัน
 
@@ -46,6 +46,7 @@ server/        index.js (HTTP), game.js (snapshot + action ที่เกี่
 | GET | `/api/me` | `{snapshot}` |
 | POST | `/api/action` | `{action, args}` → `{result, snapshot}` |
 | GET | `/api/export` | ดาวน์โหลดข้อมูลทั้งหมดของตัวเอง |
+| GET | `/api/admin/metrics` | ผลการทดสอบแบบรวม (ไม่มีข้อมูลระบุตัวบุคคล) ต้องใช้ `ADMIN_TOKEN` — ถ้าไม่ถูกต้องตอบ 404 |
 | POST | `/api/delete-account` | `{password}` ลบบัญชีและข้อมูลถาวร |
 
 `snapshot` = `{ mode, today, username, player, social: {group, buddy, buddyRequests, cheers, tradeOffers, outgoingTrades}, league, tournament, events, devTools }`
@@ -54,7 +55,7 @@ Actions: `onboard`, `checkin`, `survey`, `visibility`, `reveal-later`, `goal`, `
 
 ## กติกาความปลอดภัยและความเป็นส่วนตัวที่บังคับบนเซิร์ฟเวอร์
 
-- **บัญชี:** ชื่อผู้ใช้ + รหัสผ่านเท่านั้น ไม่เก็บอีเมล เบอร์โทร หรือชื่อจริง; รหัสผ่าน hash ด้วย scrypt + salt; token สุ่ม 256 บิต เก็บเป็น SHA-256 อายุ 30 วัน; จำกัดการลอง login/สมัคร 20 ครั้ง/15 นาที ต่อ IP
+- **บัญชี:** ชื่อผู้ใช้ + รหัสผ่านเท่านั้น ไม่เก็บอีเมล เบอร์โทร หรือชื่อจริง; รหัสผ่าน hash ด้วย scrypt + salt; token สุ่ม 256 บิต เก็บเป็น SHA-256 อายุ 30 วัน; จำกัดการลอง login/สมัคร 20 ครั้ง/15 นาที ต่อ IP (ใช้ IP จาก `X-Forwarded-For` เฉพาะเมื่อ `TRUST_PROXY=1`); ปิดการสมัครด้วยรหัสเชิญได้ (`REGISTRATION_CODE`)
 - **การมองเห็น:** สมาชิกกลุ่มเห็น streak และมินิรูมของเพื่อนเฉพาะเมื่อเพื่อนเปิดการมองเห็น (ไม่ใช่ “เฉพาะฉัน”); บัดดี้ที่ตกลงกันแล้วเห็น streak กันได้แม้อยู่ในโหมดไม่มีใครเห็น
 - **League/ทัวร์นาเมนต์:** นับเฉพาะผู้ใช้ที่เลือก “ทั้งโรงเรียน” เอง และแสดงเป็นตัวเลขรวมของโรงเรียนเท่านั้น
 - **บัดดี้:** เป็นตัวเลือกให้คนอื่นเฉพาะเมื่อกด “หาบัดดี้” เอง (ปิดได้), สถาบันเดียวกันเท่านั้น, ต้องอีกฝ่ายตอบรับ, ช่วงลองคุย 3 วันก่อนยืนยันทั้งคู่, รายงาน/บล็อกได้ (บันทึกในตาราง `reports`) และคนที่ถูกบล็อกจับคู่/ส่งกำลังใจ/แลกการ์ดไม่ได้อีก
@@ -65,7 +66,7 @@ Actions: `onboard`, `checkin`, `survey`, `visibility`, `reveal-later`, `goal`, `
 
 ## ก่อนเปิดใช้จริง (ยังไม่ได้ทำ)
 
-- **Hosting:** ต้องรันบนเครื่องที่มี disk ถาวร (เช่น VPS, Fly.io/Railway ที่มี volume) หลัง HTTPS reverse proxy; ตั้ง backup ไฟล์ SQLite สม่ำเสมอ ถ้าผู้ใช้หลักหมื่นขึ้นไปค่อยย้ายไป PostgreSQL
+- **Hosting:** เตรียม Docker + Fly.io + สำรองข้อมูลอัตโนมัติไว้แล้ว ([`deploy.md`](deploy.md)) — เหลือแค่สร้างบัญชีและ deploy; ถ้าผู้ใช้หลักหมื่นขึ้นไปค่อยย้ายไป PostgreSQL
 - **การชำระเงิน:** Premium ยังเป็น fake door (ปลดล็อกฟรี) ต้องต่อ App Store/Google Play IAP หรือ payment gateway ไทย และตรวจใบเสร็จฝั่งเซิร์ฟเวอร์
 - **ร้านค้าพาร์ทเนอร์:** ยังไม่มีหน้าให้ร้านสแกน/ยืนยันคูปอง (ตอนนี้ผู้ใช้กดยืนยันเองแทนพนักงาน)
 - **การดูแลชุมชน:** ต้องมีหน้าแอดมินดูตาราง `reports` และระงับบัญชี

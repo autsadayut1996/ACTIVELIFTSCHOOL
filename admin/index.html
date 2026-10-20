@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>ActiveLift School — ผลการทดสอบ</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Mitr:wght@300;400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="../css/style.css" />
+    <style>
+      #app { max-width: 880px; padding: 16px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+      .kpi b { display: block; font-size: 2rem; font-weight: 500; }
+      table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+      td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+      td.num, th.num { text-align: right; }
+      .login { max-width: 420px; margin: 40px auto; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <section class="card login" id="login">
+        <h2>ผลการทดสอบ (ทีมงาน)</h2>
+        <p class="muted small">ใส่ ADMIN_TOKEN ของเซิร์ฟเวอร์ · เก็บไว้ในแท็บนี้เท่านั้น ปิดแท็บแล้วต้องใส่ใหม่</p>
+        <form id="token-form">
+          <label class="field">Admin token<input id="token" type="password" autocomplete="off" /></label>
+          <button class="btn primary big" type="submit">ดูผล</button>
+        </form>
+        <p class="muted small" id="error" role="alert"></p>
+      </section>
+      <div id="out"></div>
+    </div>
+    <script src="../js/data.js"></script>
+    <script src="admin.js"></script>
+  </body>
+</html>

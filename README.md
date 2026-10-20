@@ -14,6 +14,8 @@
 
 รันเทสต์ทั้งหมด: `npm test` (ต้องใช้ Node 22.13 ขึ้นไป)
 
+**ขึ้นเซิร์ฟเวอร์ทดสอบให้นักเรียนใช้จริง:** มี `Dockerfile` + `fly.toml` พร้อมรหัสเชิญ, หน้าผลการทดสอบ `/admin/` (retention วันที่ 2/7, North Star, ราคา 59 vs 99 ฯลฯ) และสำรองข้อมูลอัตโนมัติ — ทำตาม [`docs/deploy.md`](docs/deploy.md)
+
 ออกแบบเป็น mobile-first (กว้างสุด 440px) ลองเปิดบนมือถือจะเหมือนแอปที่สุด
 
 ## Landing page (fake door test)
@@ -62,7 +64,9 @@ js/app.js         UI
 server/           เซิร์ฟเวอร์: HTTP + API, SQLite, บัญชีผู้ใช้
 landing/          หน้าลงชื่อรอเปิดตัว + A/B test (index.html, landing.css, landing.js)
 tests/            เทสต์ด้วย node:test (logic, engine, server integration)
-docs/             แผนธุรกิจ, landing page, backend
+admin/            หน้าผลการทดสอบสำหรับทีมงาน (ต้องใช้ ADMIN_TOKEN)
+docs/             แผนธุรกิจ, landing page, backend, การ deploy
+Dockerfile        image สำหรับ deploy (fly.toml = ตั้งค่า Fly.io)
 ```
 
 ## ขั้นต่อไป

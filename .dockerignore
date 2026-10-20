@@ -1,0 +1,8 @@
+.git
+node_modules
+server/data
+tests
+docs
+*.md
+Dockerfile
+fly.toml

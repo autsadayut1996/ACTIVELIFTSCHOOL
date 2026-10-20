@@ -4,7 +4,7 @@
 
   const TOKEN_KEY = 'activelift-token';
 
-  function RemoteBackend() {
+  function RemoteBackend(health) {
     let token = null;
     try {
       token = localStorage.getItem(TOKEN_KEY);
@@ -44,6 +44,7 @@
     }
 
     this.mode = 'remote';
+    this.inviteRequired = Boolean(health && health.inviteRequired);
 
     this.init = async () => {
       if (!token) return { needsAuth: true };
@@ -55,8 +56,8 @@
       }
     };
 
-    this.register = async (username, password) => {
-      const r = await api('POST', '/api/register', { username, password });
+    this.register = async (username, password, inviteCode) => {
+      const r = await api('POST', '/api/register', { username, password, inviteCode });
       setToken(r.token);
       return r;
     };
@@ -83,16 +84,18 @@
   }
 
   // Online when this page is served by the ActiveLift server; otherwise (file:// or static hosting) offline.
+  // Resolves with the server's health info, or null.
   RemoteBackend.available = async () => {
-    if (!/^https?:$/.test(location.protocol)) return false;
+    if (!/^https?:$/.test(location.protocol)) return null;
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 2500);
       const res = await fetch('/api/health', { signal: ctrl.signal });
       clearTimeout(timer);
-      return res.ok && (await res.json()).ok === true;
+      const health = res.ok ? await res.json() : null;
+      return health && health.ok === true ? health : null;
     } catch (e) {
-      return false;
+      return null;
     }
   };
 

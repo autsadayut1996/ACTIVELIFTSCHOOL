@@ -165,6 +165,13 @@
           <label class="field">รหัสผ่าน
             <input id="auth-pass" type="password" autocomplete="${reg ? 'new-password' : 'current-password'}" maxlength="128" placeholder="${reg ? 'อย่างน้อย 8 ตัว' : ''}" />
           </label>
+          ${
+            reg && backend.inviteRequired
+              ? `<label class="field">รหัสเชิญ
+                  <input id="auth-invite" autocapitalize="characters" maxlength="40" placeholder="ได้จากทีมงานหรือครู" />
+                </label>`
+              : ''
+          }
           ${reg ? '<p class="muted small">ไม่ต้องใช้อีเมล เบอร์โทร หรือชื่อจริง ใช้ชื่อผู้ใช้ที่ไม่ได้บอกว่าเป็นใครก็ได้ · a-z, 0-9, _ หรือ . ยาว 3–20 ตัว</p>' : ''}
           <button class="btn primary big" type="submit">${reg ? 'สร้างบัญชี' : 'เข้าสู่ระบบ'}</button>
         </form>
@@ -174,10 +181,11 @@
   async function submitAuth() {
     const u = document.getElementById('auth-user').value.trim();
     const pw = document.getElementById('auth-pass').value;
+    const invite = document.getElementById('auth-invite');
     if (busy) return;
     busy = true;
     try {
-      const r = authMode === 'register' ? await backend.register(u, pw) : await backend.login(u, pw);
+      const r = authMode === 'register' ? await backend.register(u, pw, invite ? invite.value : '') : await backend.login(u, pw);
       ui.onboardStep = 0;
       saveUi();
       setSnapshot(r.snapshot);
@@ -1445,7 +1453,8 @@
 
   async function boot() {
     app.innerHTML = '<main class="onboard"><div class="hero">🏸</div><p class="center muted">กำลังโหลด…</p></main>';
-    backend = (await window.RemoteBackend.available()) ? new window.RemoteBackend() : new window.LocalBackend();
+    const health = await window.RemoteBackend.available();
+    backend = health ? new window.RemoteBackend(health) : new window.LocalBackend();
     try {
       const r = await backend.init();
       if (r.needsAuth) render();

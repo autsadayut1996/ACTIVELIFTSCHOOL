@@ -101,6 +101,13 @@ const SCHEMA = `
     used_key TEXT
   );
 
+  -- Days a user opened the app (for D2/D7 retention), in that user's calendar.
+  CREATE TABLE IF NOT EXISTS activity (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    PRIMARY KEY (user_id, day)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_checkins_day ON checkins(day);
   CREATE INDEX IF NOT EXISTS idx_users_school ON users(school_id, visibility);
   CREATE INDEX IF NOT EXISTS idx_buddies_users ON buddies(from_id, to_id, status);

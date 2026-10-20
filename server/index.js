@@ -4,12 +4,15 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const db = require('./db.js');
 const auth = require('./auth.js');
 const { Game, EngineError } = require('./game.js');
+const { metrics } = require('./metrics.js');
+const { backup } = require('./backup.js');
 
 const ROOT = path.resolve(__dirname, '..');
-const STATIC_PREFIXES = ['/css/', '/js/', '/landing/'];
+const STATIC_PREFIXES = ['/css/', '/js/', '/landing/', '/admin/'];
 const MAX_BODY = 32 * 1024;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
@@ -37,8 +40,14 @@ class HttpError extends Error {
 
 function send(res, status, body, headers) {
   const data = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
-  res.writeHead(status, Object.assign({}, SECURITY_HEADERS, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, headers));
+  res.writeHead(status, Object.assign({}, SECURITY_HEADERS, res.extraHeaders, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, headers));
   res.end(data);
+}
+
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
 function readJson(req) {
@@ -78,7 +87,9 @@ function serveStatic(req, res) {
 }
 
 function createApp(opts) {
-  const options = Object.assign({ dbPath: path.join(__dirname, 'data', 'activelift.db'), devTime: false }, opts);
+  // trustProxy: only behind a reverse proxy (Fly.io, nginx) that sets X-Forwarded-*; otherwise clients could spoof their IP.
+  // registrationCode: when set, signing up requires this invite code. adminToken: enables /api/admin/metrics.
+  const options = Object.assign({ dbPath: path.join(__dirname, 'data', 'activelift.db'), devTime: false, trustProxy: false, registrationCode: '', adminToken: '' }, opts);
   const database = db.open(options.dbPath);
   const game = new Game(database, { devTime: options.devTime, now: options.now });
   const authLimit = auth.rateLimiter(options.authLimit || 20, 15 * 60000);
@@ -95,15 +106,19 @@ function createApp(opts) {
   }
 
   function clientKey(req) {
-    return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    const forwarded = options.trustProxy && req.headers['x-forwarded-for'];
+    return String(forwarded || req.socket.remoteAddress || '').split(',')[0].trim();
   }
 
   const routes = {
-    'GET /api/health': () => ({ ok: true }),
+    'GET /api/health': () => ({ ok: true, inviteRequired: Boolean(options.registrationCode) }),
 
     'POST /api/register': async (req) => {
       if (!authLimit(clientKey(req))) throw new HttpError(429, 'ลองบ่อยเกินไป รอสักครู่นะ');
       const body = await readJson(req);
+      if (options.registrationCode && !safeEqual(String(body.inviteCode || '').trim().toUpperCase(), options.registrationCode.toUpperCase())) {
+        throw new HttpError(403, 'รหัสเชิญไม่ถูกต้อง ขอรหัสจากทีมงานหรือครูนะ');
+      }
       const c = auth.validateCredentials(body.username, body.password);
       if (c.error) throw new HttpError(400, c.error);
       if (database.prepare('SELECT 1 FROM users WHERE username = ?').get(c.username)) throw new HttpError(409, 'ชื่อผู้ใช้นี้มีคนใช้แล้ว');
@@ -149,6 +164,12 @@ function createApp(opts) {
       };
     },
 
+    // Aggregated test results; hidden (404) unless ADMIN_TOKEN is configured and matches.
+    'GET /api/admin/metrics': (req) => {
+      if (!options.adminToken || !safeEqual(token(req) || '', options.adminToken)) throw new HttpError(404, 'ไม่พบ API นี้');
+      return metrics(database, game);
+    },
+
     'POST /api/delete-account': async (req) => {
       const id = requireUser(req);
       const body = await readJson(req);
@@ -160,6 +181,9 @@ function createApp(opts) {
   };
 
   async function handle(req, res) {
+    if (options.trustProxy && req.headers['x-forwarded-proto'] === 'https') {
+      res.extraHeaders = { 'Strict-Transport-Security': 'max-age=31536000' };
+    }
     const pathname = new URL(req.url, 'http://x').pathname;
     if (!pathname.startsWith('/api/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' });
@@ -187,12 +211,47 @@ function createApp(opts) {
 }
 
 if (require.main === module) {
-  const port = Number(process.env.PORT || 8080);
-  const host = process.env.HOST || '0.0.0.0';
-  const { server } = createApp({ dbPath: process.env.DB_PATH || undefined, devTime: process.env.DEV_TIME_TRAVEL === '1' });
-  server.listen(port, host, () => {
-    console.log(`ActiveLift School server on http://localhost:${port} (dev time travel ${process.env.DEV_TIME_TRAVEL === '1' ? 'on' : 'off'})`);
+  const env = process.env;
+  const port = Number(env.PORT || 8080);
+  const host = env.HOST || '0.0.0.0';
+  const { server, database } = createApp({
+    dbPath: env.DB_PATH || undefined,
+    devTime: env.DEV_TIME_TRAVEL === '1',
+    trustProxy: env.TRUST_PROXY === '1',
+    registrationCode: env.REGISTRATION_CODE || '',
+    adminToken: env.ADMIN_TOKEN || '',
   });
+
+  // Daily snapshot of the database next to it on the persistent disk (keeps the last 7).
+  if (env.BACKUP_DIR) {
+    const run = () => {
+      try {
+        console.log('backup written', backup(database, env.BACKUP_DIR));
+      } catch (e) {
+        console.error('backup failed', e);
+      }
+    };
+    setTimeout(run, 60000).unref();
+    setInterval(run, Number(env.BACKUP_HOURS || 24) * 3600000).unref();
+  }
+
+  server.listen(port, host, () => {
+    const flags = ['DEV_TIME_TRAVEL', 'TRUST_PROXY'].filter((k) => env[k] === '1');
+    if (env.REGISTRATION_CODE) flags.push('invite code');
+    if (env.ADMIN_TOKEN) flags.push('admin metrics');
+    console.log(`ActiveLift School server on http://localhost:${port}` + (flags.length ? ` [${flags.join(', ')}]` : ''));
+  });
+
+  // Finish in-flight requests and close SQLite cleanly when the host stops the machine.
+  const shutdown = () => {
+    server.close(() => {
+      database.close();
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 module.exports = { createApp };

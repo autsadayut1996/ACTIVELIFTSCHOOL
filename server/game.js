@@ -222,6 +222,7 @@ class Game {
     const today = this.today(p);
     if (!p.onboarded) return { mode: 'remote', today, player: p, username: row.username, devTools: this.devTime };
     Engine.passState(p, today);
+    this.db.prepare('INSERT OR IGNORE INTO activity (user_id, day) VALUES (?, ?)').run(id, today);
     const social = this.social(id, p, today);
     const events = Engine.refresh(p, today, { group: social.group, buddy: social.buddy && social.buddy.status !== 'pending_out' && social.buddy.status !== 'pending_in' });
     this.save(id, p);
