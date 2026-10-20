@@ -13,6 +13,10 @@
 
 ออกแบบเป็น mobile-first (กว้างสุด 440px) ลองเปิดบนมือถือจะเหมือนแอปที่สุด
 
+## Landing page (fake door test)
+
+`landing/index.html` คือหน้าลงชื่อรอเปิดตัว ใช้วัดความสนใจก่อนสร้างแอปจริง: A/B test ข้อความหลัก (“ไม่มีใครตัดสินรูปร่าง” vs “ออกกำลังกายแบบเกม”), ฟอร์มลงชื่อ (บทบาท, โรงเรียน, กิจกรรมที่สนใจ, อีเมล + ยินยอม), ปุ่มแชร์ LINE และนับ event ทุกขั้นของ funnel ส่งเข้า Google Sheets ได้โดยไม่ต้องมีเซิร์ฟเวอร์ — วิธีตั้งค่าและอ่านผลอยู่ใน [`docs/landing-setup.md`](docs/landing-setup.md)
+
 ## สิ่งที่มีใน prototype
 
 | ฟีเจอร์ (จากแผน) | ใน prototype |
@@ -50,7 +54,8 @@ js/logic.js       logic ล้วน: วันที่, streak + freeze, XP/�
 js/data.js        ข้อมูลสถาบัน กิจกรรม ไอเท็ม รางวัล Battle Pass การ์ด ร้านพาร์ทเนอร์ และผู้ใช้จำลอง
 js/app.js         UI และการจัดการ state
 tests/            เทสต์ด้วย node:test
-docs/             สรุปแผนธุรกิจและแผนทดสอบ
+landing/          หน้าลงชื่อรอเปิดตัว + A/B test (index.html, landing.css, landing.js)
+docs/             สรุปแผนธุรกิจ แผนทดสอบ และวิธีตั้งค่า landing page
 ```
 
 ## ขั้นต่อไป

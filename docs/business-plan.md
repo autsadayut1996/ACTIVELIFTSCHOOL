@@ -40,6 +40,10 @@ School League + Anti-toxic Gamification + Battle Pass ราคาไทย + Co
 Battle Pass / Season Pass ราคาไทย, Cosmetic-only IAP, B2B2C ขายให้โรงเรียน/มหาวิทยาลัย, Local Brand Redemption, Parent-pay Family Plan, Rewarded Ads
 **กติกา:** ห้ามขายทางลัด XP (ไม่ pay-to-win)
 
+## Landing page + fake door test
+
+ทำแล้วที่ `landing/` (ตามขั้น Prototype: “ทำหน้าเว็บเดียวโชว์ concept + ปุ่มสมัครล่วงหน้า วัด conversion”) พร้อม A/B test ข้อความหลักระหว่าง “ความปลอดภัยทางใจ” กับ “เกม/การแข่งขัน” — ดู [`landing-setup.md`](landing-setup.md)
+
 ## แผนทดสอบ prototype
 
 1. ให้นักเรียน 10–15 คนลองใช้ 7 วัน (ใช้ปุ่ม “ข้ามไปวันถัดไป” ได้เมื่อทดสอบในห้อง)
