@@ -178,8 +178,83 @@
     return { score, reasons, shared };
   }
 
+  // ---- Battle Pass seasons (global 35-day blocks so every school shares a season) ----
+
+  const SEASON_EPOCH = '2026-10-19'; // launch Monday of season 1
+  const SEASON_DAYS = 35;
+  const XP_PER_TIER = 80; // ~5 check-ins a week reaches the last tier by season end
+  const MAX_TIER = 12;
+
+  function seasonFor(today) {
+    const index = Math.max(0, Math.floor(diffDays(SEASON_EPOCH, today) / SEASON_DAYS));
+    const startKey = addDays(SEASON_EPOCH, index * SEASON_DAYS);
+    const endKey = addDays(startKey, SEASON_DAYS - 1);
+    return { number: index + 1, startKey, endKey, daysLeft: diffDays(today, endKey) + 1 };
+  }
+
+  function xpBetween(checkins, fromKey, toKey) {
+    return Object.keys(checkins)
+      .filter((k) => k >= fromKey && k <= toKey)
+      .reduce((sum, k) => sum + (checkins[k].xp || 0), 0);
+  }
+
+  function tierFor(seasonXp) {
+    const tier = Math.min(MAX_TIER, Math.floor(seasonXp / XP_PER_TIER));
+    return { tier, into: tier === MAX_TIER ? XP_PER_TIER : seasonXp % XP_PER_TIER, need: XP_PER_TIER };
+  }
+
+  // ---- School League: ranked by average weekly XP per active member, so small schools can win ----
+
+  function schoolWeek(school, week, dayOfWeek) {
+    const members = 30 + Math.floor(seededRandom(school.id + '|members') * 370);
+    const pace = 25 + seededRandom(school.id + '|' + week) * 20; // avg XP per member per day
+    return { members, total: Math.round(members * pace * (dayOfWeek + 1)) };
+  }
+
+  function schoolLeague(schools, mySchoolId, myWeekXp, counted, today) {
+    const week = weekKey(today);
+    const dayOfWeek = diffDays(week, today);
+    return schools
+      .map((s) => {
+        const w = schoolWeek(s, week, dayOfWeek);
+        const mine = s.id === mySchoolId && counted;
+        const members = w.members + (mine ? 1 : 0);
+        const total = w.total + (mine ? myWeekXp : 0);
+        return { id: s.id, name: s.name, members, total, avg: Math.round(total / members), mine: s.id === mySchoolId };
+      })
+      .sort((a, b) => b.avg - a.avg)
+      .map((row, i) => Object.assign(row, { rank: i + 1 }));
+  }
+
+  // ---- Collectible cards ----
+
+  // `need` maps a stat name to the minimum value required.
+  function achievementsEarned(defs, stats) {
+    return defs.filter((d) => Object.keys(d.need).every((k) => (stats[k] || 0) >= d.need[k])).map((d) => d.id);
+  }
+
+  // Deterministic pack: rarer cards are less likely.
+  const RARITY_WEIGHT = { common: 6, rare: 3, epic: 1 };
+
+  function openPack(cards, seed, size) {
+    const pool = [];
+    cards.forEach((c) => {
+      for (let i = 0; i < RARITY_WEIGHT[c.rarity]; i++) pool.push(c.id);
+    });
+    return Array.from({ length: size }, (_, i) => pool[Math.floor(seededRandom(seed + '#' + i) * pool.length)]);
+  }
+
   const api = {
     FREEZES_PER_WEEK,
+    SEASON_DAYS,
+    XP_PER_TIER,
+    MAX_TIER,
+    seasonFor,
+    xpBetween,
+    tierFor,
+    schoolLeague,
+    achievementsEarned,
+    openPack,
     INVISIBLE_DAYS,
     BUDDY_TRIAL_DAYS,
     keyFromLocalDate,

@@ -45,7 +45,15 @@
       cheersSent: 0,
       surveys: [],
       lastSeenStreak: 0,
+      bestStreak: 0,
+      freezeUsed: false,
+      revealed: false,
+      cards: {},
+      pass: null,
+      priceVariant: null,
+      fakeDoor: { views: 0, buyClicks: 0, parentClicks: 0 },
       tab: 'home',
+      seasonView: 'pass',
     };
   }
 
@@ -103,18 +111,31 @@
     return names.map((n) => D.PEOPLE.find((p) => p.name === n)).filter(Boolean);
   }
 
-  let toastTimer = null;
+  const toastQueue = [];
+  let toastBusy = false;
   function toast(msg) {
+    toastQueue.push(msg);
+    // Keep only the latest few so rapid taps don't build a long backlog.
+    toastQueue.splice(0, Math.max(0, toastQueue.length - 2));
+    if (!toastBusy) nextToast();
+  }
+
+  function nextToast() {
     let el = document.querySelector('.toast');
     if (!el) {
       el = document.createElement('div');
       el.className = 'toast';
       document.body.appendChild(el);
     }
-    el.textContent = msg;
+    if (!toastQueue.length) {
+      toastBusy = false;
+      el.classList.remove('show');
+      return;
+    }
+    toastBusy = true;
+    el.textContent = toastQueue.shift();
     el.classList.add('show');
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+    setTimeout(nextToast, 2000);
   }
 
   function openModal(html) {
@@ -243,6 +264,7 @@
   const TABS = [
     { id: 'home', name: 'วันนี้', icon: '☀️' },
     { id: 'room', name: 'มินิรูม', icon: '🏠' },
+    { id: 'season', name: 'ซีซั่น', icon: '🏆' },
     { id: 'friends', name: 'เพื่อน', icon: '🤝' },
     { id: 'me', name: 'ฉัน', icon: '🌱' },
   ];
@@ -251,9 +273,10 @@
     const s = streak();
     maybeAskExitSurvey(s);
     state.lastSeenStreak = s.count;
+    awardAchievements(s);
     save();
 
-    const views = { home: viewHome, room: viewRoom, friends: viewFriends, me: viewMe };
+    const views = { home: viewHome, room: viewRoom, season: viewSeason, friends: viewFriends, me: viewMe };
     app.innerHTML = `
       <header class="topbar">
         <div class="who"><span class="mini-avatar">${state.profile.avatar}</span>${esc(state.profile.nickname)}</div>
@@ -337,11 +360,7 @@
               <p class="muted">สร้างกลุ่ม 5–10 คน หรือให้เราหาบัดดี้จากสถาบันเดียวกันให้</p>
             </section>`
       }
-      <section class="card soon">
-        <h3>🏫 School League <span class="pill">Phase 2</span></h3>
-        <p class="muted small">อันดับคิดจาก XP รวมของทั้งโรงเรียน ไม่ใช่รายบุคคล — ${esc(schoolName())}</p>
-        ${state.visibility === 'school' ? '<p class="small">XP ของคุณถูกนับรวมให้โรงเรียนแล้ว 💪</p>' : '<p class="small">XP ของคุณจะยังไม่ถูกนับจนกว่าคุณจะเปิดการมองเห็นระดับโรงเรียน</p>'}
-      </section>`;
+      ${homeSeasonCard(t)}`;
   }
 
   function openCheckin() {
@@ -418,7 +437,7 @@
 
   // ---------- mini room ----------
 
-  function roomHtml(placed, theme, avatar, acc) {
+  function roomHtml(placed, theme, avatar, acc, badge) {
     const th = theme ? byId(D.ITEMS, theme).theme : { wall: '#fdf0f6', floor: '#f3d9e6' };
     const accItem = byId(D.ACCESSORIES, acc);
     return `
@@ -429,17 +448,19 @@
           .filter((i) => i && !i.theme)
           .map((i) => `<span class="item" style="left:${i.x}%;top:${i.y}%;font-size:${i.size}rem" title="${esc(i.name)}">${i.emoji}</span>`)
           .join('')}
+        ${badge ? `<span class="badge">${esc(badge)}</span>` : ''}
         <span class="me" style="left:52%;top:40%">${accItem && accItem.emoji ? `<span class="acc">${accItem.emoji}</span>` : ''}${avatar}</span>
       </div>`;
   }
 
   function viewRoom() {
     const visibleTo = { self: 'เฉพาะคุณ 👻', friends: 'กลุ่มเพื่อนสนิท', class: unitLabel() + 'และเพื่อนสนิท', school: 'ทั้งโรงเรียน' }[state.visibility];
-    const shopItems = D.ITEMS.concat(D.ACCESSORIES.filter((a) => a.id !== 'none'));
+    // Season exclusives only appear once earned from the Battle Pass.
+    const shopItems = D.ITEMS.concat(D.ACCESSORIES.filter((a) => a.id !== 'none')).filter((i) => !i.season || state.owned.includes(i.id));
     return `
       <section class="card">
         <div class="row between"><h3>ห้องของ${esc(state.profile.nickname)}</h3><span class="pill">มองเห็นโดย: ${visibleTo}</span></div>
-        ${roomHtml(state.placed, state.theme, state.profile.avatar, state.acc)}
+        ${roomHtml(state.placed, state.theme, state.profile.avatar, state.acc, schoolBadge())}
         <p class="muted small">ขยับครบ = ได้เหรียญมาแต่งห้อง แต่งเสร็จแคปไปลงสตอรี่ได้เลย 📸</p>
       </section>
       <section class="card">
@@ -602,6 +623,338 @@
       <div class="chips">${D.CHEERS.map((c) => `<button class="chip" data-action="cheer-msg" data-to="${esc(name)}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`);
   }
 
+  // ---------- season: Battle Pass, School League, collectible cards ----------
+
+  function playerStats(s) {
+    const list = Object.values(state.checkins);
+    return {
+      total: list.length,
+      partial: list.filter((c) => c.kind === 'partial').length,
+      bestStreak: state.bestStreak,
+      freezeUsed: state.freezeUsed ? 1 : 0,
+      activities: new Set(list.map((c) => c.activity)).size,
+      group: state.group ? 1 : 0,
+      buddy: state.buddy ? 1 : 0,
+      cheers: state.cheersSent,
+      revealed: state.revealed ? 1 : 0,
+    };
+  }
+
+  function awardAchievements(s) {
+    state.bestStreak = Math.max(state.bestStreak, s.count);
+    if (s.frozenDays.length) state.freezeUsed = true;
+    if (state.visibility !== 'self') state.revealed = true;
+    const fresh = L.achievementsEarned(D.ACHIEVEMENTS, playerStats(s)).filter((id) => !state.cards[id]);
+    fresh.forEach((id) => {
+      state.cards[id] = 1;
+      const a = byId(D.ACHIEVEMENTS, id);
+      setTimeout(() => toast('ได้การ์ดใหม่ ' + a.emoji + ' ' + a.name + '!'), 300);
+    });
+  }
+
+  function weekXp() {
+    return L.xpBetween(state.checkins, L.weekKey(today()), today());
+  }
+
+  function leagueRows() {
+    const schools = D.SCHOOLS.filter((x) => x.id !== 'other');
+    if (state.profile.schoolId === 'other') schools.push({ id: 'other', name: schoolName() });
+    return L.schoolLeague(schools, state.profile.schoolId, weekXp(), state.visibility === 'school', today());
+  }
+
+  function schoolBadge() {
+    if (state.visibility !== 'school') return '';
+    const mine = leagueRows().find((r) => r.mine);
+    return mine ? '🏫 #' + mine.rank : '';
+  }
+
+  function confirmSchoolVisibility() {
+    return confirm('เปิดให้ทั้งโรงเรียนเห็น?\n\nคนในโรงเรียนจะเห็นชื่อเล่นและมินิรูมของคุณ และ XP ของคุณจะถูกนับเข้า School League (อันดับเป็นของโรงเรียน ไม่มีอันดับรายบุคคล)\nเปลี่ยนกลับได้ตลอด');
+  }
+
+  function passState() {
+    const season = L.seasonFor(today());
+    if (!state.pass || state.pass.season !== season.number) {
+      state.pass = { season: season.number, premium: false, claimedFree: [], claimedPremium: [] };
+    }
+    if (!state.priceVariant) state.priceVariant = D.PASS_PRICES[Math.floor(Math.random() * D.PASS_PRICES.length)];
+    return state.pass;
+  }
+
+  function rewardLabel(r) {
+    if (r.coins) return '🪙 ' + r.coins;
+    if (r.pack) return '🃏 การ์ด ' + r.pack + ' แพ็ก';
+    const item = byId(D.ITEMS, r.item) || byId(D.ACCESSORIES, r.item);
+    return item.emoji + ' ' + item.name;
+  }
+
+  function homeSeasonCard(t) {
+    const season = L.seasonFor(t);
+    const tier = L.tierFor(L.xpBetween(state.checkins, season.startKey, t));
+    const mine = leagueRows().find((r) => r.mine);
+    return `
+      <section class="card soon link" data-action="tab" data-v="season">
+        <div class="row between"><h3>🏆 ซีซั่น ${season.number}</h3><span class="pill">เหลือ ${season.daysLeft} วัน</span></div>
+        <p class="small">Battle Pass tier <b>${tier.tier}/${L.MAX_TIER}</b> · ${esc(schoolName())} อันดับ <b>#${mine ? mine.rank : '-'}</b> สัปดาห์นี้</p>
+        <p class="muted small">${state.visibility === 'school' ? 'XP ของคุณช่วยโรงเรียนอยู่ 💪' : 'XP ของคุณยังไม่ถูกนับเข้า League (ตั้งค่าได้ในแท็บ ฉัน)'}</p>
+      </section>`;
+  }
+
+  function viewSeason() {
+    const seg = [
+      ['pass', '🎟️ Battle Pass'],
+      ['league', '🏫 League'],
+      ['cards', '🃏 การ์ด'],
+    ];
+    const views = { pass: viewPass, league: viewLeague, cards: viewCards };
+    return `
+      <div class="seg">${seg.map(([v, n]) => `<button class="${state.seasonView === v ? 'on' : ''}" data-action="season-view" data-v="${v}">${n}</button>`).join('')}</div>
+      ${views[state.seasonView]()}`;
+  }
+
+  function viewPass() {
+    const t = today();
+    const pass = passState();
+    const season = L.seasonFor(t);
+    const sxp = L.xpBetween(state.checkins, season.startKey, t);
+    const tier = L.tierFor(sxp);
+    const cell = (track, i) => {
+      const r = (track === 'free' ? D.PASS_FREE : D.PASS_PREMIUM)[i];
+      const claimed = (track === 'free' ? pass.claimedFree : pass.claimedPremium).includes(i);
+      const reached = tier.tier > i;
+      const locked = track === 'premium' && !pass.premium;
+      let action = '';
+      if (claimed) action = '<span class="pill">รับแล้ว ✓</span>';
+      else if (reached && !locked) action = `<button class="btn small primary" data-action="claim" data-v="${track}:${i}">รับ</button>`;
+      else action = `<span class="pill muted-pill">${locked ? '🔒' : 'tier ' + (i + 1)}</span>`;
+      return `<div class="tier-cell${reached ? ' reached' : ''}${claimed ? ' claimed' : ''}"><span>${rewardLabel(r)}</span>${action}</div>`;
+    };
+    const claimable = D.PASS_FREE.some((_, i) => tier.tier > i && !pass.claimedFree.includes(i)) || (pass.premium && D.PASS_PREMIUM.some((_, i) => tier.tier > i && !pass.claimedPremium.includes(i)));
+    return `
+      <section class="card">
+        <div class="row between"><h3>Battle Pass ซีซั่น ${season.number}</h3><span class="pill">เหลือ ${season.daysLeft} วัน</span></div>
+        <p class="small">Tier <b>${tier.tier}/${L.MAX_TIER}</b> · Season XP ${sxp}</p>
+        <div class="bar"><div style="width:${(tier.into / tier.need) * 100}%"></div></div>
+        <p class="muted small">ได้ XP จากการเช็คอินเท่านั้น ซื้อ XP ไม่ได้ — Premium เป็นของแต่งล้วนๆ</p>
+        ${claimable ? '<button class="btn primary" data-action="claim-all">รับรางวัลทั้งหมด</button>' : ''}
+      </section>
+      ${
+        pass.premium
+          ? ''
+          : `<section class="card premium-cta">
+              <h3>✨ Premium Pass ${state.priceVariant} บาท</h3>
+              <p class="small">ปลดล็อกแถว Premium: ธีมซากุระ ตุ๊กตาหมี ดอกไม้ทัดหู และแพ็กการ์ดเพิ่ม ใช้ได้ทั้งซีซั่น ${L.SEASON_DAYS} วัน</p>
+              <button class="btn primary" data-action="buy-pass">ดู Premium</button>
+            </section>`
+      }
+      <section class="card">
+        <div class="tiers-head"><span>ฟรี</span><span>Premium ${pass.premium ? '✨' : '🔒'}</span></div>
+        <div class="tiers">
+          ${D.PASS_FREE.map((_, i) => `<div class="tier-row"><b class="tier-no">${i + 1}</b>${cell('free', i)}${cell('premium', i)}</div>`).join('')}
+        </div>
+      </section>`;
+  }
+
+  function grant(r, seed) {
+    if (r.coins) state.coins += r.coins;
+    if (r.item && !state.owned.includes(r.item)) state.owned.push(r.item);
+    if (!r.pack) return [];
+    return L.openPack(D.PHOTOCARDS, seed, 3 * r.pack).map((id) => {
+      const isNew = !state.cards[id];
+      state.cards[id] = (state.cards[id] || 0) + 1;
+      return { id, isNew };
+    });
+  }
+
+  function claim(keys) {
+    const pass = passState();
+    let cards = [];
+    const labels = [];
+    keys.forEach(([track, i]) => {
+      const list = track === 'free' ? pass.claimedFree : pass.claimedPremium;
+      if (list.includes(i)) return;
+      list.push(i);
+      const r = (track === 'free' ? D.PASS_FREE : D.PASS_PREMIUM)[i];
+      labels.push(rewardLabel(r));
+      cards = cards.concat(grant(r, [state.profile.nickname, pass.season, track, i].join('|')));
+    });
+    save();
+    render();
+    if (cards.length) showPack(cards);
+    else if (labels.length) toast('ได้ ' + labels.join(', '));
+  }
+
+  function claimAll() {
+    const pass = passState();
+    const tier = L.tierFor(L.xpBetween(state.checkins, L.seasonFor(today()).startKey, today())).tier;
+    const keys = [];
+    for (let i = 0; i < tier; i++) {
+      keys.push(['free', i]);
+      if (pass.premium) keys.push(['premium', i]);
+    }
+    claim(keys);
+  }
+
+  function showPack(pulled) {
+    openModal(`
+      <h2>เปิดแพ็กการ์ด! 🃏</h2>
+      <div class="cards pack">
+        ${pulled
+          .map((p, i) => {
+            const c = byId(D.PHOTOCARDS, p.id);
+            return `<div class="pcard ${c.rarity}" style="animation-delay:${i * 0.12}s"><span class="pcard-emoji">${c.emoji}</span><b>${esc(c.name)}</b><small>${D.RARITY[c.rarity]} · ${p.isNew ? 'ใหม่!' : 'ซ้ำ'}</small></div>`;
+          })
+          .join('')}
+      </div>
+      <p class="muted small">การ์ดซ้ำเอาไปแลกกับเพื่อนในแก๊งได้ที่แท็บการ์ด</p>
+      <button class="btn primary big" data-action="close-modal">เก็บเข้าอัลบั้ม</button>`);
+  }
+
+  function openBuyPass() {
+    state.fakeDoor.buyClicks++;
+    save();
+    openModal(`
+      <h2>✨ Premium Pass ซีซั่น ${state.pass.season}</h2>
+      <p>${state.priceVariant} บาท จ่ายครั้งเดียวทั้งซีซั่น ไม่ใช่รายเดือน</p>
+      <ul class="promise">
+        ${D.PASS_PREMIUM.filter((r) => r.item).map((r) => `<li>${rewardLabel(r)}</li>`).join('')}
+        <li>🃏 การ์ดเพิ่ม ${D.PASS_PREMIUM.reduce((n, r) => n + (r.pack || 0), 0)} แพ็ก</li>
+      </ul>
+      <p class="muted small">ไม่มี XP boost ไม่มีทางลัด — ทุกคนไต่ tier ด้วยความสม่ำเสมอเท่ากัน</p>
+      <button class="btn primary big" data-action="pass-self">ซื้อเอง ${state.priceVariant} บาท</button>
+      <button class="btn big" data-action="pass-parent">👨‍👩‍👧 ขอให้ผู้ปกครองซื้อให้</button>
+      <button class="btn big ghost-btn" data-action="close-modal">ไว้ก่อน</button>`);
+  }
+
+  function unlockPremiumTrial(extra) {
+    state.pass.premium = true;
+    save();
+    render();
+    openModal(`
+      <div class="hero">💛</div>
+      <h2>ขอบคุณที่สนใจ!</h2>
+      <p>นี่คือ prototype ยังไม่มีการเก็บเงินจริง เราปลดล็อก Premium ให้ทดลองฟรีตลอดซีซั่นนี้</p>
+      ${extra || ''}
+      <button class="btn primary big" data-action="close-modal">ไปรับรางวัล</button>`);
+  }
+
+  function parentMessage() {
+    const total = Object.keys(state.checkins).length;
+    return `ช่วยซื้อ Premium Pass ของแอป ActiveLift School ให้หน่อยได้ไหม (${state.priceVariant} บาท ครั้งเดียวทั้งซีซั่น) เป็นของแต่งห้องล้วนๆ ไม่มีทางลัด ตอนนี้ออกกำลังกายมาแล้ว ${total} วัน 💪`;
+  }
+
+  function viewLeague() {
+    const rows = leagueRows();
+    const mine = rows.find((r) => r.mine);
+    const top = rows.slice(0, 8);
+    if (mine && mine.rank > 8) top.push(mine);
+    const max = rows[0].avg;
+    const resetIn = 7 - L.diffDays(L.weekKey(today()), today());
+    return `
+      <section class="card">
+        <div class="row between"><h3>🏫 School League</h3><span class="pill">รีเซ็ตใน ${resetIn} วัน</span></div>
+        <p class="muted small">วัดจาก XP เฉลี่ยต่อสมาชิกในสัปดาห์นี้ โรงเรียนเล็กก็ชนะได้ ไม่มีอันดับรายบุคคล</p>
+        <div class="league">
+          ${top
+            .map(
+              (r) => `
+            <div class="league-row${r.mine ? ' mine' : ''}">
+              <span class="rank">${r.rank <= 3 ? ['🥇', '🥈', '🥉'][r.rank - 1] : '#' + r.rank}</span>
+              <div class="grow"><b>${esc(r.name)}</b><div class="bar thin"><div style="width:${(r.avg / max) * 100}%"></div></div></div>
+              <span class="small">${r.avg}</span>
+            </div>`
+            )
+            .join('')}
+        </div>
+      </section>
+      <section class="card">
+        ${
+          state.visibility === 'school'
+            ? `<p>คุณช่วย ${esc(schoolName())} ไป <b>+${weekXp()} XP</b> สัปดาห์นี้ 💪</p><p class="muted small">ป้าย ${esc(schoolBadge())} แสดงอยู่ในมินิรูมของคุณ</p>`
+            : `<p>XP ของคุณยังไม่ถูกนับเข้า League</p>
+               <p class="muted small">ไม่เป็นไรเลย ค่อยเปิดตอนพร้อม XP และ streak ส่วนตัวยังสะสมตามปกติ</p>
+               <button class="btn" data-action="join-league">นับ XP ของฉันให้โรงเรียน</button>`
+        }
+      </section>`;
+  }
+
+  function viewCards() {
+    const ach = D.ACHIEVEMENTS;
+    const pcs = D.PHOTOCARDS;
+    const ownedPc = pcs.filter((c) => state.cards[c.id]).length;
+    return `
+      <section class="card">
+        <div class="row between"><h3>การ์ดความสำเร็จ</h3><span class="pill">${ach.filter((a) => state.cards[a.id]).length}/${ach.length}</span></div>
+        <p class="muted small">ได้จาก milestone ความสม่ำเสมอ ไม่ใช่จากรูปร่างหรือตัวเลขบนตาชั่ง</p>
+        <div class="cards">
+          ${ach
+            .map((a) =>
+              state.cards[a.id]
+                ? `<div class="pcard ${a.rarity}"><span class="pcard-emoji">${a.emoji}</span><b>${esc(a.name)}</b><small>${esc(a.desc)}</small></div>`
+                : `<div class="pcard locked"><span class="pcard-emoji">🔒</span><b>???</b><small>${esc(a.desc)}</small></div>`
+            )
+            .join('')}
+        </div>
+      </section>
+      <section class="card">
+        <div class="row between"><h3>โฟโต้การ์ด</h3><span class="pill">${ownedPc}/${pcs.length}</span></div>
+        <p class="muted small">ได้จากแพ็กใน Battle Pass · ใบซ้ำแลกกับเพื่อนในแก๊งได้</p>
+        <div class="cards">
+          ${pcs
+            .map((c) => {
+              const n = state.cards[c.id] || 0;
+              if (!n) return `<div class="pcard locked"><span class="pcard-emoji">❔</span><b>???</b><small>${D.RARITY[c.rarity]}</small></div>`;
+              return `<div class="pcard ${c.rarity}"><span class="pcard-emoji">${c.emoji}</span><b>${esc(c.name)}</b><small>${D.RARITY[c.rarity]}${n > 1 ? ' · x' + n : ''}</small>${n > 1 ? `<button class="btn small" data-action="trade" data-v="${c.id}">แลก</button>` : ''}</div>`;
+            })
+            .join('')}
+        </div>
+      </section>`;
+  }
+
+  function tradePartners() {
+    const names = (state.group ? state.group.members : []).concat(state.buddy ? [state.buddy.name] : []);
+    return peopleFor(names).filter((p) => !state.blocked.includes(p.name));
+  }
+
+  // Each friend offers one photocard you are missing, fixed per day.
+  function tradeOffer(person, giveId) {
+    const missing = D.PHOTOCARDS.filter((c) => !state.cards[c.id] && c.id !== giveId);
+    if (!missing.length) return null;
+    return missing[Math.floor(L.seededRandom(person.name + '|' + giveId + '|' + today()) * missing.length)];
+  }
+
+  function openTrade(giveId) {
+    const give = byId(D.PHOTOCARDS, giveId);
+    const partners = tradePartners();
+    let body;
+    if (!partners.length) {
+      body = `<p class="muted">แลกได้เฉพาะกับเพื่อนในแก๊งหรือบัดดี้ ยังไม่มีเลย ลองสร้างกลุ่มก่อนนะ</p>
+        <button class="btn primary" data-action="tab" data-v="friends">ไปหน้าเพื่อน</button>`;
+    } else {
+      body = partners
+        .map((p) => {
+          const offer = tradeOffer(p, giveId);
+          return `<div class="member"><span class="mini-avatar">${p.avatar}</span>
+            <div class="grow"><b>${esc(p.name)}</b><br/><small class="muted">${offer ? 'ให้ ' + offer.emoji + ' ' + esc(offer.name) : 'ไม่มีใบที่คุณยังขาด'}</small></div>
+            ${offer ? `<button class="btn small primary" data-action="do-trade" data-v="${giveId}" data-to="${esc(p.name)}">แลก</button>` : ''}</div>`;
+        })
+        .join('');
+    }
+    openModal(`<h2>แลก ${give.emoji} ${esc(give.name)}</h2><p class="muted small">แลกเฉพาะใบซ้ำ ใบสุดท้ายของคุณจะอยู่กับคุณเสมอ</p>${body}`);
+  }
+
+  function doTrade(giveId, name) {
+    const person = D.PEOPLE.find((p) => p.name === name);
+    const offer = tradeOffer(person, giveId);
+    if (!offer || (state.cards[giveId] || 0) < 2) return closeModal();
+    state.cards[giveId]--;
+    state.cards[offer.id] = 1;
+    save();
+    closeModal();
+    render();
+    toast('แลกกับ' + name + 'แล้ว ได้ ' + offer.emoji + ' ' + offer.name);
+  }
+
   // ---------- me / settings ----------
 
   function viewMe() {
@@ -712,6 +1065,8 @@
       toast('ยินดีต้อนรับ ' + state.profile.nickname + '! 🎉');
     },
     tab(v) {
+      if (v === 'season' && state.tab !== 'season') state.fakeDoor.views++;
+      closeModal();
       state.tab = v;
       window.scrollTo(0, 0);
     },
@@ -814,6 +1169,47 @@
       state.buddy = null;
       toast('เราได้รับรายงานแล้ว ขอบคุณที่บอกเรา 🙏');
     },
+    'season-view'(v) {
+      state.seasonView = v;
+    },
+    claim(v) {
+      const [track, i] = v.split(':');
+      claim([[track, Number(i)]]);
+      return 'keep';
+    },
+    'claim-all'() {
+      claimAll();
+      return 'keep';
+    },
+    'buy-pass'() {
+      openBuyPass();
+      return 'keep';
+    },
+    'pass-self'() {
+      unlockPremiumTrial();
+      return 'keep';
+    },
+    'pass-parent'() {
+      state.fakeDoor.parentClicks++;
+      const msg = parentMessage();
+      // The message is also shown in the modal in case the clipboard is unavailable.
+      if (navigator.clipboard) navigator.clipboard.writeText(msg).catch(() => {});
+      unlockPremiumTrial(`<p class="label">ข้อความส่งให้ผู้ปกครอง</p><div class="note">${esc(msg)}</div>`);
+      return 'keep';
+    },
+    'join-league'() {
+      if (!confirmSchoolVisibility()) return 'keep';
+      state.visibility = 'school';
+      toast('XP ของคุณช่วยโรงเรียนแล้ว 🏫');
+    },
+    trade(v) {
+      openTrade(v);
+      return 'keep';
+    },
+    'do-trade'(v, el) {
+      doTrade(v, el.dataset.to);
+      return 'keep';
+    },
     'next-day'() {
       state.dayOffset++;
       toast('ข้ามไป ' + today());
@@ -848,7 +1244,10 @@
       return;
     }
     const a = el.dataset.action;
-    if (a === 'visibility') state.visibility = el.value;
+    if (a === 'visibility') {
+      if (el.value === 'school' && state.visibility !== 'school' && !confirmSchoolVisibility()) return render();
+      state.visibility = el.value;
+    }
     else if (a === 'set-minutes') state.profile.minutes = Number(el.value);
     else if (a === 'set-days') state.profile.daysPerWeek = Number(el.value);
     else return;

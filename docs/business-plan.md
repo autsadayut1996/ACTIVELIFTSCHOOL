@@ -29,9 +29,9 @@ School League + Anti-toxic Gamification + Battle Pass ราคาไทย + Co
 | | Close-Friends Group + Group streak | ✅ (สมาชิกจำลอง) |
 | | Buddy-Matching อัตโนมัติ | ✅ (ผู้ใช้จำลอง) |
 | | Temporary Invisible Mode + progressive disclosure | ✅ |
-| Phase 2 (เดือน 4–6) | School League Leaderboard (คิดรวมทั้งโรงเรียน) | 🔜 การ์ดตัวอย่างเท่านั้น |
-| | Battle Pass ซีซั่นแรก (59–99 บาท, cosmetic เท่านั้น) | ⏳ |
-| | Collectible Cards | ⏳ |
+| Phase 2 (เดือน 4–6) | School League Leaderboard (คิดรวมทั้งโรงเรียน) | ✅ (โรงเรียนจำลอง, เฉลี่ยต่อสมาชิก, รายสัปดาห์) |
+| | Battle Pass ซีซั่นแรก (59–99 บาท, cosmetic เท่านั้น) | ✅ (ทดสอบราคา 59 vs 99 แบบ fake door + Parent-pay) |
+| | Collectible Cards | ✅ (การ์ดความสำเร็จ + โฟโต้การ์ด แลกกับเพื่อนได้) |
 | Phase 3 | Inter-school Tournament, Local Brand Redemption | ⏳ |
 
 ## โมเดลรายได้
@@ -46,7 +46,8 @@ Battle Pass / Season Pass ราคาไทย, Cosmetic-only IAP, B2B2C ขา
 3. Metric หลัก: % ที่กลับมาวันที่ 2 และวันที่ 7
 4. **North Star:** % ผู้ใช้ที่กลับมาสัปดาห์ที่ 2 พร้อมเพื่อนอย่างน้อย 1 คน
 5. เก็บไฟล์จาก “ส่งออกข้อมูลทดสอบ” ไว้ดู check-in, อารมณ์ และเหตุผลจาก exit survey
-6. ถ้าผลชี้ว่า POV statement ผิด ให้ย้อนกลับไปขั้น Define ไม่ฝืนสร้างฟีเจอร์ต่อ
+6. Willingness to pay: เทียบ `fakeDoor.buyClicks / fakeDoor.views` ระหว่างคนที่เห็นราคา 59 กับ 99 บาท (`priceVariant`) และดูสัดส่วน `parentClicks` เพื่อประเมิน Parent-pay Family Plan
+7. ถ้าผลชี้ว่า POV statement ผิด ให้ย้อนกลับไปขั้น Define ไม่ฝืนสร้างฟีเจอร์ต่อ
 
 ## หลัก Customer-Centric (ใช้ตรวจทุกฟีเจอร์)
 
@@ -55,3 +56,9 @@ Battle Pass / Season Pass ราคาไทย, Cosmetic-only IAP, B2B2C ขา
 - ทุกฟีเจอร์ต้องตอบได้ว่าแก้ Unmet Need ข้อไหน
 - คอนเทนต์และข้อความต้องไม่ส่งเสริมการเปรียบเทียบรูปร่าง
 - ฟังจากคนที่เลิกใช้มากกว่าคนที่ยังใช้อยู่ (exit survey)
+
+## ข้อจำกัดของ prototype
+
+- League, กลุ่ม, บัดดี้ และการแลกการ์ดใช้ข้อมูลจำลอง ยังไม่มี backend
+- รางวัล Battle Pass ชุดเดียวกันจะวนซ้ำในซีซั่นถัดไป (ของจริงต้องออกแบบรางวัลใหม่ทุกซีซั่นจากผลสำรวจ)
+- ยังไม่มีการชำระเงินจริง ปุ่มซื้อเป็น fake door เท่านั้น
